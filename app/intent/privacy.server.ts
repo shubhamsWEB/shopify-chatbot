@@ -3,20 +3,30 @@
 // Used by the mandatory compliance webhooks and app/uninstalled.
 import prisma from "../db.server";
 
-// Full shop erasure: shop/redact and app/uninstalled. Removes ALL data we hold
-// for the shop. Idempotent — webhooks retry and fire post-uninstall.
-export async function purgeShop(shop: string): Promise<void> {
+// app/uninstalled: drop PII + live credentials only. Billing/stats tables
+// (ShopSettings, LlmUsage, ReplyCount, EventRollup) stay so backoffice history
+// and reply/cost caps survive reinstall. Idempotent — webhooks retry.
+export async function purgePiiOnUninstall(shop: string): Promise<void> {
   await Promise.all([
     prisma.event.deleteMany({ where: { shopId: shop } }),
     prisma.intentProfile.deleteMany({ where: { shopId: shop } }),
     prisma.storefrontToken.deleteMany({ where: { shop } }),
     prisma.session.deleteMany({ where: { shop } }),
+    prisma.chatTranscript.deleteMany({ where: { shop } }).catch(() => {}), // table may not exist yet
+  ]);
+  console.log(`[privacy] purged PII for ${shop}`);
+}
+
+// shop/redact: mandatory full erasure when Shopify deletes the shop (~48h post-uninstall).
+export async function purgeShop(shop: string): Promise<void> {
+  await purgePiiOnUninstall(shop);
+  await Promise.all([
     prisma.shopSettings.deleteMany({ where: { shop } }),
     prisma.llmUsage.deleteMany({ where: { shop } }),
-    prisma.chatTranscript.deleteMany({ where: { shop } }).catch(() => {}), // table may not exist yet
     prisma.eventRollup.deleteMany({ where: { shop } }).catch(() => {}),
+    prisma.$executeRawUnsafe(`DELETE FROM "ReplyCount" WHERE shop = $1`, shop).catch(() => {}),
   ]);
-  console.log(`[privacy] purged all data for ${shop}`);
+  console.log(`[privacy] fully purged ${shop}`);
 }
 
 // Single-customer erasure: customers/redact. Deletes that customer's events and
