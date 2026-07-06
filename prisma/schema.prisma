@@ -1,16 +1,15 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Intent-driven chatbot data model.
+// Hot layer lives in Redis; this is the durable warm/cold store + dashboard source.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
 model Session {
@@ -31,4 +30,120 @@ model Session {
   emailVerified Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+// Per-shop Storefront API delegate token, minted at install via the Admin API
+// (not hardcoded). Recreated on invalidation. Admin offline token refresh is
+// handled by the library (expiringOfflineAccessTokens).
+model StorefrontToken {
+  shop      String   @id
+  token     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// One row per canonical event (pixels + webhooks + bot_*). Cold layer + dashboard.
+model Event {
+  id         String   @id @default(cuid())
+  eventId    String   @unique // idempotency key — dedupes webhook retries
+  shopId     String
+  sessionId  String
+  customerId String?
+  type       String
+  source     String // web_pixel | webhook | chatbot
+  timestamp  DateTime
+
+  // denormalized for dashboard queries + micro-summary context
+  productId  String?
+  category   String?
+  brand      String?
+  price      Float?
+  searchTerm String?
+
+  payload      Json // full CanonicalEvent
+  microSummary Json? // Stage-1 result (speculation already stripped), set by intent worker
+
+  createdAt DateTime @default(now())
+
+  @@index([shopId, sessionId, timestamp])
+  @@index([shopId, customerId])
+  @@index([shopId, type])
+}
+
+// Aggregated per-user intent (Stage 2). Mirrored into Redis for per-turn reads.
+model IntentProfile {
+  id         String  @id @default(cuid())
+  shopId     String
+  // identity key: customerId once resolved, else sessionId
+  profileKey String
+  sessionId  String?
+  customerId String?
+
+  narrative            String  @default("")
+  profile              Json // structured IntentProfile (spec 3.4)
+  conversionLikelihood Float?
+  eventsConsidered     Int     @default(0)
+  computeTier          String  @default("warm") // hot | warm | cold
+
+  // embedding of the intent narrative (spec 3.6). Set on warm cadence if semantic ranking enabled.
+  embedding Unsupported("vector(1536)")?
+
+  lastUpdated DateTime @default(now()) @updatedAt
+  createdAt   DateTime @default(now())
+
+  @@unique([shopId, profileKey])
+  @@index([shopId, lastUpdated])
+}
+
+// Per-shop merchant settings (brand grounding for the bot, welcome copy).
+// Created lazily via CREATE TABLE IF NOT EXISTS in settings.server so no
+// out-of-band `prisma db push` is needed against production.
+model ShopSettings {
+  shop             String   @id
+  brandDescription String   @default("")
+  welcomeMessage   String   @default("")
+  config           Json     @default("{}") // BotConfig overrides (see settings.server)
+  backoffice       Json     @default("{}") // developer-managed: plan/limits/kill switch
+  shopInfo         Json     @default("{}") // synced from Shopify's Shop object (see shopinfo.server)
+  updatedAt        DateTime @default(now()) @updatedAt
+}
+
+// Per-session chat transcript so returning visitors (same saleshq_sid cookie,
+// new tab/day) see their conversation. Created lazily like ShopSettings.
+model ChatTranscript {
+  shop      String
+  sessionId String
+  messages  Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@id([shop, sessionId])
+}
+
+// Daily aggregates of pruned events — dashboards keep long-term trends while
+// raw Event rows are retained only for a rolling window. Lazy-created.
+model EventRollup {
+  shop    String
+  day     DateTime @db.Date
+  type    String
+  count   Int      @default(0)
+  revenue Float    @default(0)
+
+  @@id([shop, day, type])
+}
+
+// Per-day LLM usage metering (real token counts from response.usage) — powers
+// the dashboard's actual-cost panel. Lazy-created like ShopSettings.
+model LlmUsage {
+  shop             String
+  day              DateTime @db.Date
+  model            String
+  calls            Int      @default(0)
+  inputTokens      Int      @default(0)
+  outputTokens     Int      @default(0)
+  cacheReadTokens  Int      @default(0)
+  cacheWriteTokens Int      @default(0)
+  costUsd          Float    @default(0)
+
+  @@id([shop, day, model])
 }

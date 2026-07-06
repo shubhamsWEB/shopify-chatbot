@@ -12,13 +12,14 @@
         const parsed = JSON.parse(saved);
         return {
           open: parsed.open || false,
-          history: parsed.history || []
+          history: parsed.history || [],
+          lastMessageAt: parsed.lastMessageAt || 0
         };
       }
     } catch (e) {
       // Ignore parse errors
     }
-    return { open: false, history: [] };
+    return { open: false, history: [], lastMessageAt: 0 };
   }
 
   // Save state to sessionStorage
@@ -31,6 +32,143 @@
   }
 
   const state = loadState();
+
+  /* Backend config injected by app-embed.liquid */
+  const CONFIG = window.__SALESHQ_CONFIG__ || {};
+  // App Proxy path — same-origin, Shopify HMAC-signs the request with the real
+  // shop, so the server derives shopId and the client can't spoof it.
+  const API_BASE = "/apps/saleshq";
+  const SHOP_ID = CONFIG.shopId || location.host; // legacy field; server ignores it
+
+  /* Consent: honor the Shopify Customer Privacy API. When analytics consent is
+     not granted we keep the chat working but DON'T persist a tracking cookie,
+     run proactive popups, or emit behavioral events. */
+  function analyticsAllowed() {
+    try {
+      const cp = window.Shopify && window.Shopify.customerPrivacy;
+      if (cp && typeof cp.analyticsProcessingAllowed === "function") {
+        return cp.analyticsProcessingAllowed();
+      }
+    } catch (e) { /* ignore */ }
+    return true; // API absent (store hasn't configured consent) → behave as before
+  }
+
+  /* Session id — shared with the Web Pixel via a first-party cookie (only when
+     consent allows; otherwise an in-memory id that isn't persisted). */
+  function getSessionId() {
+    const m = document.cookie.match(/(?:^|;\s*)saleshq_sid=([^;]+)/);
+    if (m) return m[1];
+    const sid = "sid_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    if (analyticsAllowed()) {
+      document.cookie = `saleshq_sid=${sid}; path=/; max-age=2592000; SameSite=Lax`;
+    }
+    return sid;
+  }
+  const SESSION_ID = getSessionId();
+
+  /* Stamp session onto the cart so it survives checkout (checkout.shopify.com
+     can't read the storefront cookie) and lands in order note_attributes. */
+  function syncSessionToCart() {
+    if (!analyticsAllowed()) return;
+    fetch("/cart/update.js", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attributes: { saleshq_sid: SESSION_ID } }),
+    }).catch(function () {});
+  }
+  syncSessionToCart();
+
+  /* Event batching: one request per ~4s instead of one per event — cuts server
+     invocations ~10x at scale. Events keep their creation timestamps, so the
+     intent engine's timing math is unaffected by delivery delay. flushEvents()
+     runs before every proactive/chat call (no stale-session race) and with
+     keepalive on page exit (nothing lost to navigation). */
+  let eventQueue = [];
+  let flushTimer = null;
+  function queueEvent(ev) {
+    eventQueue.push(ev);
+    if (eventQueue.length >= 8) { flushEvents(); return; }
+    if (!flushTimer) flushTimer = setTimeout(() => flushEvents(), 4000);
+  }
+  function flushEvents(useKeepalive) {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (!eventQueue.length) return Promise.resolve();
+    const batch = eventQueue;
+    eventQueue = [];
+    try {
+      return fetch(`${API_BASE}/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        keepalive: !!useKeepalive || batch.length <= 8,
+        body: JSON.stringify({ events: batch })
+      }).catch(() => {});
+    } catch (e) { return Promise.resolve(); }
+  }
+  window.addEventListener("pagehide", () => flushEvents(true));
+
+  /* Feedback loop (spec §9): log bot_* actions back through ingestion */
+  function emitBot(type, product) {
+    if (!analyticsAllowed()) return; // behavioral tracking needs consent
+    try {
+      queueEvent({
+        eventId: `${type}_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        shopId: SHOP_ID,
+        sessionId: SESSION_ID,
+        type,
+        timestamp: new Date().toISOString(),
+        productId: product?.productId
+      });
+      if (type === "bot_add_to_cart") syncSessionToCart();
+      if (type === "bot_product_clicked" || type === "bot_add_to_cart") flushEvents(true); // may precede navigation
+    } catch (e) { /* never throw into storefront */ }
+  }
+
+  /* Proactive decision-engine signals (spec §4). */
+  function detectSurface() {
+    const p = location.pathname;
+    if (/\/products\//.test(p)) return "product";
+    if (/\/cart/.test(p)) return "cart";
+    if (/\/checkouts?\//.test(p)) return "checkout";
+    if (/\/collections\//.test(p)) return "category";
+    if (/\/search/.test(p)) return "search";
+    return "other";
+  }
+  function activeFormFieldNow() {
+    const el = document.activeElement;
+    return !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+  }
+  // Track rapid scroll-direction reversals (the "scroll thrash" friction signal).
+  // Polls scrollY instead of listening for scroll events — some themes swallow
+  // scroll events entirely (custom scroll/view-transition scripts), and polling
+  // is theme-agnostic. On category/search surfaces the thrash IS the trigger
+  // friction, so once it crosses the server threshold we report it (one ping
+  // per page) and re-ask the engine.
+  let scrollThrash = 0, lastScrollY = window.scrollY, lastDir = 0, thrashReported = false;
+  setInterval(() => {
+    const y = window.scrollY, dir = Math.sign(y - lastScrollY);
+    if (dir !== 0 && lastDir !== 0 && dir !== lastDir) scrollThrash++;
+    if (dir !== 0) lastDir = dir;
+    lastScrollY = y;
+    const surface = detectSurface();
+    const threshold = surface === "search" ? 2 : 3;
+    if (!thrashReported && (surface === "category" || surface === "search") && scrollThrash >= threshold) {
+      thrashReported = true;
+      emitFriction("page_view", {});
+      setTimeout(() => runProactive(), 1500); // let the friction event ingest first
+    }
+  }, 400);
+
+  /* Emit a friction event into the intent stream (consent-gated, batched). */
+  function emitFriction(type, extra) {
+    if (!analyticsAllowed()) return;
+    try {
+      queueEvent({
+        eventId: `${type}_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        shopId: SHOP_ID, sessionId: SESSION_ID, type, timestamp: new Date().toISOString(),
+        surface: detectSurface(), scrollThrash, ...extra,
+      });
+    } catch (e) { /* never throw into storefront */ }
+  }
 
   /* Inject CSS animations and styles */
   const styleSheet = document.createElement("style");
@@ -50,6 +188,30 @@
     .saleshq-btn:hover {
       transform: scale(1.08) !important;
       box-shadow: 0 8px 25px rgba(0,0,0,0.25) !important;
+    }
+    @keyframes saleshq-pulse {
+      0% { box-shadow: 0 4px 20px rgba(0,0,0,0.2), 0 0 0 0 rgba(220,38,38,0.5); }
+      70% { box-shadow: 0 4px 20px rgba(0,0,0,0.2), 0 0 0 14px rgba(220,38,38,0); }
+      100% { box-shadow: 0 4px 20px rgba(0,0,0,0.2), 0 0 0 0 rgba(220,38,38,0); }
+    }
+    .saleshq-btn--attention { animation: saleshq-pulse 1.6s ease-out infinite; }
+    .saleshq-badge {
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 5px;
+      background: #dc2626;
+      color: #fff;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 700;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+      pointer-events: none;
     }
     .saleshq-input:focus {
       outline: none;
@@ -318,10 +480,54 @@
     </svg>
   `;
 
+  /* Notification badge + soft chime for auto-popups. WebAudio needs a user
+     gesture on most browsers — the chime resumes/queues on first interaction. */
+  function chime() {
+    if (!CFG.soundEnabled) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const play = () => {
+        try {
+          const ctx = (window.__saleshqAC = window.__saleshqAC || new AC());
+          if (ctx.state === "suspended") return; // no gesture yet — stay silent
+          const t = ctx.currentTime;
+          [830, 1245].forEach((freq, i) => {
+            const o = ctx.createOscillator(), g = ctx.createGain();
+            o.type = "sine"; o.frequency.value = freq;
+            g.gain.setValueAtTime(0.0001, t + i * 0.12);
+            g.gain.exponentialRampToValueAtTime(0.06, t + i * 0.12 + 0.02);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.12 + 0.3);
+            o.connect(g); g.connect(ctx.destination);
+            o.start(t + i * 0.12); o.stop(t + i * 0.12 + 0.35);
+          });
+        } catch (e) { /* ignore */ }
+      };
+      play();
+    } catch (e) { /* never throw into storefront */ }
+  }
+  // resume audio on the first real gesture so later chimes are audible
+  ["pointerdown", "keydown", "touchstart"].forEach((evt) =>
+    document.addEventListener(evt, () => {
+      try { window.__saleshqAC && window.__saleshqAC.resume(); } catch (e) { /* ignore */ }
+    }, { once: true, passive: true }));
+
+  function setBadge(n) {
+    if (!badgeEl) return;
+    if (n > 0 && !CFG.badgeEnabled) return;
+    if (n > 0 && !state.open) {
+      badgeEl.textContent = String(n);
+      badgeEl.style.display = "flex";
+      button.classList.add("saleshq-btn--attention");
+    } else {
+      badgeEl.style.display = "none";
+      button.classList.remove("saleshq-btn--attention");
+    }
+  }
+
   /* Floating Button */
   const button = document.createElement("div");
   button.className = "saleshq-btn";
-  button.innerHTML = chatIconSvg;
   button.style.cssText = `
     position: fixed;
     bottom: 24px;
@@ -340,15 +546,23 @@
     box-shadow: 0 4px 20px rgba(0,0,0,0.2);
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   `;
+  const badgeEl = document.createElement("span");
+  badgeEl.className = "saleshq-badge";
+  // innerHTML writes wipe children, so the badge is re-attached on every icon swap
+  function setButtonIcon(svg) {
+    button.innerHTML = svg;
+    button.appendChild(badgeEl);
+  }
+  setButtonIcon(chatIconSvg);
 
-  /* Chat Box */
+  /* Chat Box — full height (pinned top+bottom), wide, responsive on mobile */
   const chat = document.createElement("div");
   chat.style.cssText = `
     position: fixed;
+    top: 24px;
     bottom: 100px;
     right: 24px;
-    width: 380px;
-    height: 520px;
+    width: min(480px, calc(100vw - 48px));
     background: #fff;
     border-radius: 20px;
     box-shadow: 0 12px 50px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
@@ -398,12 +612,26 @@
     </div>
     <div id="saleshq-messages" style="
       flex: 1;
-      padding: 20px;
+      padding: 14px;
       overflow-y: auto;
       overflow-x: hidden;
       background: #f8f9fa;
       scroll-behavior: smooth;
     "></div>
+    <div id="saleshq-tips-footer" style="
+      text-align: center;
+      padding: 2px 0 6px;
+      background: #f8f9fa;
+    ">
+      <button id="saleshq-tips-off" style="
+        background: none;
+        border: none;
+        color: #9ca3af;
+        font-size: 11px;
+        cursor: pointer;
+        text-decoration: underline;
+      ">Don't show tips this session</button>
+    </div>
     <form id="saleshq-form" style="
       display: flex;
       align-items: center;
@@ -452,10 +680,15 @@
     if (state.open) {
       chat.style.display = "flex";
       chat.style.animation = "saleshq-fade-in 0.3s ease-out forwards";
-      button.innerHTML = closeIconSvg;
+      setButtonIcon(closeIconSvg);
+      setBadge(0); // opening clears the unread badge
     } else {
+      // Closing the widget just closes it — it does NOT silence the session.
+      // Nag protection is the per-session cap + per-trigger cooldown, so a shopper
+      // who closes one nudge can still get a later, different one (e.g. compare).
+      proactiveOpen = false;
       chat.style.animation = "saleshq-fade-out 0.2s ease-out forwards";
-      button.innerHTML = chatIconSvg;
+      setButtonIcon(chatIconSvg);
       setTimeout(() => {
         chat.style.display = "none";
       }, 200);
@@ -464,80 +697,454 @@
 
   button.onclick = toggleChat;
 
+  button.style.display = "none";
   document.body.appendChild(button);
   document.body.appendChild(chat);
+
+  let proactiveRecheckTimer = null;
+  function shutdownWidget() {
+    try { button.remove(); chat.remove(); styleSheet.remove(); } catch (e) { /* ignore */ }
+    if (proactiveRecheckTimer) clearInterval(proactiveRecheckTimer);
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    eventQueue = [];
+    window.__SALESHQ_CHAT__ = false;
+  }
 
   const messagesEl = chat.querySelector("#saleshq-messages");
   const form = chat.querySelector("#saleshq-form");
   const input = chat.querySelector("#saleshq-input");
   const closeBtn = chat.querySelector("#saleshq-close");
 
+  // Typing counts as activity — never nudge someone mid-thought.
+  input.addEventListener("input", () => { lastInteractionAt = Date.now(); });
+
   closeBtn.onclick = toggleChat;
+
+  /* Merchant configuration (admin → Bot settings): welcome copy + behavior
+     knobs. Cached per session so only the first page pays the round-trip.
+     Defaults reproduce shipped behavior when the fetch fails. */
+  let WELCOME = "Hi! 👋 I'm your personal shopping assistant. I can:\n- **Find products** that fit your needs and budget\n- **Compare items** side by side\n- **Recommend picks** personalized to what you're browsing\n- **Answer questions** on details, sizing, and stock\n\nWhat are you looking for today?";
+  const CFG = {
+    botEnabled: true,
+    proactiveEnabled: true,
+    welcomeEnabled: true,
+    welcomeDelayMs: 10_000,
+    idleResumeEnabled: true,
+    idleResumeMs: 50_000,
+    soundEnabled: true,
+    badgeEnabled: true,
+  };
+  function applyCfg(c) {
+    if (!c) return;
+    if (c.welcome) WELCOME = c.welcome;
+    for (const k of Object.keys(CFG)) {
+      if (typeof c[k] === typeof CFG[k]) CFG[k] = c[k];
+    }
+  }
+  async function loadConfig() {
+    try {
+      const r = await fetch(`${API_BASE}/config`, { cache: "no-store" });
+      if (r.ok) {
+        const c = await r.json();
+        applyCfg(c);
+        if (c.botEnabled !== false) {
+          try { sessionStorage.setItem("saleshq_cfg", JSON.stringify(c)); } catch (e) { /* ignore */ }
+        } else {
+          try { sessionStorage.removeItem("saleshq_cfg"); } catch (e) { /* ignore */ }
+        }
+      }
+    } catch (e) { /* ignore — defaults keep widget usable until next page */ }
+  }
+
+  /* Returning visitor (same saleshq_sid cookie, new tab/day): the tab-local
+     cache is empty but the server keeps the transcript — pull it back. */
+  async function loadServerHistory() {
+    if (state.history.length > 0) return; // local cache wins (fresher)
+    try {
+      const r = await fetch(`${API_BASE}/history?sessionId=${encodeURIComponent(SESSION_ID)}`);
+      if (r.ok) {
+        const d = await r.json();
+        if (Array.isArray(d.messages) && d.messages.length) {
+          state.history = d.messages.slice(-50);
+          saveState();
+        }
+      }
+    } catch (e) { /* ignore — worst case, fresh welcome */ }
+  }
 
   /* Restore previous messages or show welcome */
   function restoreMessages() {
     if (state.history.length > 0) {
-      // Restore messages without re-saving to state
-      state.history.forEach(({ role, content }) => {
+      // Restore messages without re-saving to state. Product carousels are
+      // content — restore all of them; follow-up chips only for the LAST
+      // message (older ones were superseded by the conversation moving on).
+      state.history.forEach((entry, i) => {
         const msg = document.createElement("div");
         msg.style.cssText = `
           margin-bottom: 14px;
           display: flex;
-          justify-content: ${role === "user" ? "flex-end" : "flex-start"};
+          justify-content: ${entry.role === "user" ? "flex-end" : "flex-start"};
         `;
-        const isUser = role === "user";
-        const formattedText = parseMarkdown(content);
-        msg.innerHTML = `
-          <div style="
-            display: inline-block;
-            padding: 12px 16px;
-            border-radius: ${isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px"};
-            background: ${isUser ? "linear-gradient(135deg, #1a1a1a 0%, #333 100%)" : "#fff"};
-            color: ${isUser ? "#fff" : "#1a1a1a"};
-            max-width: 80%;
-            font-size: 14px;
-            line-height: 1.5;
-            box-shadow: ${isUser ? "none" : "0 2px 8px rgba(0,0,0,0.06)"};
-            word-wrap: break-word;
-          ">
-            ${formattedText}
-          </div>
-        `;
+        msg.innerHTML = bubbleHtml(entry.role, parseMarkdown(entry.content));
         messagesEl.appendChild(msg);
+        if (entry.products && entry.products.length) renderProductCarousel(entry.products);
+        if (i === state.history.length - 1 && entry.followups && entry.followups.length) {
+          renderFollowups(entry.followups);
+        }
       });
       messagesEl.scrollTop = messagesEl.scrollHeight;
     } else {
-      // Show welcome message for new conversations
-      addMessage("assistant", "Hi there! How can I help you today?");
+      // Show welcome message + intent-revealing starter CTAs for new conversations
+      const starters = [
+        "Help me find something",
+        "Show your bestsellers",
+        "I'm shopping for a gift"
+      ];
+      addMessage("assistant", WELCOME, { followups: starters });
+      renderFollowups(starters);
     }
   }
 
   /* Restore open state if previously open */
   if (state.open) {
     chat.style.display = "flex";
-    button.innerHTML = closeIconSvg;
+    setButtonIcon(closeIconSvg);
   }
 
-  restoreMessages();
+  Promise.all([loadConfig(), loadServerHistory()]).finally(() => {
+    if (CFG.botEnabled === false) { shutdownWidget(); return; }
+    button.style.display = "flex";
+    restoreMessages();
+    scheduleWelcome();
+    syncTipsFooter(); // config may disable proactive → hide the opt-out link
+    startProactivePolling();
+  });
 
-  /* Parse markdown to HTML */
+  /* Proactive popup (spec §7.5): on ANY page, ask the server whether to pop up.
+     The server reads the shopper's live intent (built from pixel events) and
+     decides the action — comparison, cart help, or a personalized recommendation —
+     or declines. Server enforces the frequency cap; we just gate one call per page. */
+
+  // Resolve the current product's Storefront GID (only when on a product page).
+  // Fast path: ShopifyAnalytics meta; fallback: /products/<handle> Ajax JSON.
+  async function currentProductGid() {
+    const m = window.ShopifyAnalytics?.meta?.product || window.meta?.product;
+    if (m?.gid) return m.gid;
+    if (m?.id) return `gid://shopify/Product/${m.id}`;
+    const match = location.pathname.match(/\/products\/([^/?#]+)/);
+    if (match) {
+      try {
+        const res = await fetch(`${getShopifyRoot()}products/${match[1]}.js`);
+        if (res.ok) {
+          const prod = await res.json();
+          if (prod?.id) return `gid://shopify/Product/${prod.id}`;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    return null;
+  }
+
+  // True when the currently-open widget was opened by a proactive popup (a reply
+  // = engagement). proactiveDisabled = the shopper explicitly turned tips off
+  // for this session via the popup's control (distinct from just closing).
+  let proactiveOpen = false;
+  let proactiveDisabled = false;
+  try { proactiveDisabled = sessionStorage.getItem("saleshq_tips_off") === "1"; } catch (e) { /* ignore */ }
+
+  // Last time the shopper actively touched the chat (typing counts, not just
+  // sending). Combined with state.lastMessageAt to decide "gone quiet".
+  let lastInteractionAt = 0;
+  function chatIsIdle() {
+    if (!CFG.idleResumeEnabled) return false;
+    const lastAct = Math.max(state.lastMessageAt || 0, lastInteractionAt || 0);
+    return Date.now() - lastAct >= CFG.idleResumeMs;
+  }
+
+  async function runProactive(opts) {
+    opts = opts || {};
+    if (!API_BASE || proactiveDisabled || !CFG.proactiveEnabled || !CFG.botEnabled) return;
+    try { await seedDone; } catch (e) { /* seeds are best-effort */ }
+    try { await flushEvents(); } catch (e) { /* engine must see this page's events */ }
+    // A shopper who is chatting drives the conversation — but once they've gone
+    // quiet for CHAT_IDLE_MS, intent nudges resume (into the open window if
+    // it's still open, or as a fresh popup).
+    const idle = chatIsIdle();
+    const hasChatted = state.history.some((m) => m.role === "user");
+    if ((state.open || hasChatted) && !idle) return;
+    if (!analyticsAllowed()) return; // proactive targeting is behavioral → needs consent
+    let productId = null;
+    try { productId = await currentProductGid(); } catch (e) { /* ignore */ }
+
+    const wasOpen = state.open;
+    try {
+      const res = await fetch(`${API_BASE}/proactive`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({
+          shopId: SHOP_ID, sessionId: SESSION_ID,
+          productId: productId || undefined,
+          surface: detectSurface(),
+          exitIntent: !!opts.exitIntent,
+          activeFormField: activeFormFieldNow(),
+          // "open but idle 50s" counts as not actively engaged for the gate
+          widgetOpen: state.open && !idle,
+        })
+      });
+      const data = await res.json();
+      if (!data.show) return;
+      if (state.open && !wasOpen) return; // user opened it themselves mid-flight
+      proactiveOpen = true;
+      chime();
+      if (!state.open) toggleChat(); // closed → open with the ready-made nudge
+      addMessage("assistant", data.response, { products: data.products || [], followups: data.followups || [] });
+      if (data.products && data.products.length) renderProductCarousel(data.products);
+      if (data.followups && data.followups.length) renderFollowups(data.followups);
+    } catch (e) { /* never disrupt the storefront */ }
+  }
+
+  // Explicit opt-out: a PERSISTENT footer link inside the chat (was appended per
+  // popup, so it appeared inconsistently — gone after refresh/welcome). Plain
+  // close keeps popups on; this silences proactive for the rest of THIS session
+  // (server /dismiss enforces it server-side too).
+  const tipsFooter = chat.querySelector("#saleshq-tips-footer");
+  const tipsOffBtn = chat.querySelector("#saleshq-tips-off");
+  function syncTipsFooter() {
+    if (tipsFooter) tipsFooter.style.display = proactiveDisabled || !CFG.proactiveEnabled ? "none" : "";
+  }
+  if (tipsOffBtn) {
+    tipsOffBtn.onclick = () => {
+      proactiveDisabled = true;
+      try { sessionStorage.setItem("saleshq_tips_off", "1"); } catch (e) { /* ignore */ }
+      try {
+        fetch(`${API_BASE}/dismiss`, { method: "POST", headers: { "Content-Type": "text/plain" },
+          keepalive: true, body: JSON.stringify({ shopId: SHOP_ID, sessionId: SESSION_ID }) }).catch(() => {});
+      } catch (e) { /* ignore */ }
+      syncTipsFooter();
+      if (state.open) toggleChat();
+    };
+  }
+  syncTipsFooter();
+
+  // Significant-event trigger: exit-intent (cursor leaving toward the top) is the
+  // last-chance moment — fire immediately, once per page (spec §10).
+  let exitFired = false;
+  document.addEventListener("mouseout", (e) => {
+    if (exitFired || state.open) return;
+    if (e.clientY <= 0 && !e.relatedTarget) {
+      exitFired = true;
+      emitFriction("exit_intent", {});
+      runProactive({ exitIntent: true });
+    }
+  });
+
+  // Cart-idle signal: on the cart surface, report idle time if they sit still.
+  if (detectSurface() === "cart") {
+    setTimeout(() => { if (!state.open) emitFriction("page_view", { cartIdleMs: 26_000 }); }, 26_000);
+  }
+
+  // Dwell signal: lingering on a product (no comparison loop yet) is friction too.
+  // Report dwell once past the baseline (product baseline 5s → ~9s), then re-check.
+  if (detectSurface() === "product") {
+    const DWELL_MS = 10_000;
+    setTimeout(async () => {
+      if ((state.open || state.history.some((m) => m.role === "user")) && !chatIsIdle()) return;
+      let pid = null;
+      try { pid = await currentProductGid(); } catch (e) { /* ignore */ }
+      emitFriction("page_view", { dwellMs: DWELL_MS, productId: pid || undefined });
+      setTimeout(() => runProactive(), 1500); // let the dwell event ingest first
+    }, DWELL_MS);
+  }
+
+
+  /* Seed the intent stream from the page context. Fallback for stores where the
+     sandboxed pixel can't reach the App Proxy (password-protected previews send
+     the pixel's fetch through the password wall without cookies). The server
+     dedupes these against real pixel events, so on a healthy-pixel store this
+     is a no-op. Proactive calls await `seedDone` so the engine never composes
+     against a session that's missing this page's events (e.g. a cart removal). */
+  const seedDone = (async function seedIntent() {
+    if (!analyticsAllowed()) return;
+    const surface = detectSurface();
+    const seed = (type, extra) => {
+      try {
+        queueEvent({
+          eventId: `seed_${type}_${SESSION_ID}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          shopId: SHOP_ID, sessionId: SESSION_ID, type, source: "widget_seed",
+          timestamp: new Date().toISOString(), surface, ...extra,
+        });
+      } catch (e) { /* never throw into storefront */ }
+    };
+    if (surface === "product") {
+      const match = location.pathname.match(/\/products\/([^/?#]+)/);
+      if (!match) return;
+      try {
+        const res = await fetch(`${getShopifyRoot()}products/${match[1]}.js`);
+        if (res.ok) {
+          const p = await res.json();
+          seed("product_view", {
+            productId: `gid://shopify/Product/${p.id}`,
+            price: typeof p.price === "number" ? p.price / 100 : undefined,
+            category: p.type || undefined,
+          });
+        }
+      } catch (e) { /* ignore */ }
+    } else if (surface === "category") {
+      const cat = (location.pathname.match(/\/collections\/([^/?#]+)/) || [])[1];
+      seed("collection_view", { category: cat ? decodeURIComponent(cat) : undefined });
+    } else if (surface === "search") {
+      const q = new URLSearchParams(location.search).get("q");
+      if (q) seed("search", { searchTerm: q });
+    }
+
+    // Cart diff (every page): compare the live cart against the last snapshot and
+    // mirror the TRANSITIONS as add_to_cart / remove_from_cart. Removal is a key
+    // hesitation signal the sandboxed pixel can't deliver on password-protected
+    // stores. Diff fires once per transition, so timestamped eventIds are safe.
+    try {
+      const cart = await fetch(`${getShopifyRoot()}cart.js`).then((r) => r.json());
+      const now = {};
+      (cart.items || []).forEach((it) => {
+        now[it.variant_id] = { product_id: it.product_id, price: it.price, product_type: it.product_type };
+      });
+      let prev = {};
+      try { prev = JSON.parse(localStorage.getItem("saleshq_cart_snapshot") || "{}"); } catch (e) { /* ignore */ }
+      const cartEvent = (type, it) => seed(type, {
+        productId: `gid://shopify/Product/${it.product_id}`,
+        price: typeof it.price === "number" ? it.price / 100 : undefined,
+        category: it.product_type || undefined,
+      });
+      for (const vid in now) if (!prev[vid]) cartEvent("add_to_cart", now[vid]);
+      for (const vid in prev) if (!now[vid]) cartEvent("remove_from_cart", prev[vid]);
+      localStorage.setItem("saleshq_cart_snapshot", JSON.stringify(now));
+    } catch (e) { /* ignore */ }
+  })();
+
+  function startProactivePolling() {
+    setTimeout(() => runProactive(), 4000);
+    proactiveRecheckTimer = setInterval(() => {
+      proactiveChecks++;
+      if (proactiveChecks > 20 || proactiveDisabled) {
+        clearInterval(proactiveRecheckTimer);
+        return;
+      }
+      if (!idlePinged && chatIsIdle() && state.history.some((m) => m.role === "user")) {
+        idlePinged = true;
+        currentProductGid()
+          .catch(() => null)
+          .then((pid) => emitFriction("page_view", { dwellMs: CFG.idleResumeMs, productId: pid || undefined }));
+        setTimeout(() => runProactive(), 1500);
+        return;
+      }
+      runProactive();
+    }, 30_000);
+  }
+
+  /* Welcome attention flow: once per browser session — badge + chime teaser,
+     then auto-open the chat with the welcome + starter chips at the merchant-
+     configured delay. Pure UI, no LLM, no server call. Intent nudges arriving
+     later still fire (close ≠ dismiss). Returning sessions with an existing
+     conversation get the badge only (never clobber a conversation). Skipped
+     after a dismissal or once the shopper has chatted. Scheduled AFTER config
+     load so the merchant's delay/enable settings apply. */
+  function scheduleWelcome() {
+    if (!CFG.welcomeEnabled) return;
+    try { if (sessionStorage.getItem("saleshq_welcomed")) return; } catch (e) { /* ignore */ }
+    const teaserMs = Math.max(2_000, CFG.welcomeDelayMs - 6_000);
+    setTimeout(() => {
+      if (state.open || proactiveDisabled || state.history.some((m) => m.role === "user")) return;
+      setBadge(1);
+      chime();
+    }, teaserMs);
+    setTimeout(() => {
+      if (state.open || proactiveDisabled) return;
+      if (state.history.some((m) => m.role === "user")) return;
+      try { sessionStorage.setItem("saleshq_welcomed", "1"); } catch (e) { /* ignore */ }
+      if (state.history.length > 1) return; // returning conversation → badge stays, no auto-open
+      chime();
+      toggleChat();
+    }, CFG.welcomeDelayMs);
+  }
+
+  // Keep offering help while the shopper stays on the page: re-ask the server
+  // every 30s (gates run server-side and are cheap — no LLM unless one fires).
+  // Stops when the shopper engages the chat, turns tips off, or after 10 checks.
+  let proactiveChecks = 0;
+  let idlePinged = false;
+
+  /* One clean message bubble. Assistant bubbles are wider so tables/lists stay
+     fully readable; user bubbles stay compact. */
+  function bubbleHtml(role, html) {
+    const isUser = role === "user";
+    return `<div style="
+      display:inline-block;
+      padding:10px 14px;
+      border-radius:${isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px"};
+      background:${isUser ? "linear-gradient(135deg,#1a1a1a,#333)" : "#fff"};
+      color:${isUser ? "#fff" : "#1f2937"};
+      max-width:${isUser ? "82%" : "96%"};
+      font-size:14px;line-height:1.5;letter-spacing:-0.1px;
+      box-shadow:${isUser ? "none" : "0 1px 2px rgba(0,0,0,0.08)"};
+      border:${isUser ? "none" : "1px solid #eef0f2"};
+      word-wrap:break-word;overflow-wrap:anywhere;
+    ">${html}</div>`;
+  }
+
+  /* Parse markdown → HTML: tables, headings, rules, lists, bold/italic.
+     Escapes HTML first (XSS-safe), then renders block + inline elements. */
   function parseMarkdown(text) {
-    return text
-      // Escape HTML first to prevent XSS
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      // Bold: **text** or __text__
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/__(.+?)__/g, "<strong>$1</strong>")
-      // Italic: *text* or _text_
-      .replace(/\*(.+?)\*/g, "<em>$1</em>")
-      .replace(/_(.+?)_/g, "<em>$1</em>")
-      // Line breaks
-      .replace(/\n/g, "<br>");
+    const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const inline = (s) =>
+      esc(s)
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/__(.+?)__/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*]+?)\*/g, "$1<em>$2</em>")
+        .replace(/(^|[^_])_([^_]+?)_/g, "$1<em>$2</em>");
+
+    const lines = String(text).split("\n");
+    const out = [];
+    let i = 0;
+    let listOpen = false;
+    const closeList = () => { if (listOpen) { out.push("</ul>"); listOpen = false; } };
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // Table: a |...| row followed by a |---| separator row
+      if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+        closeList();
+        const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+        const header = cells(line);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(cells(lines[i])); i++; }
+        let t = '<div style="overflow-x:auto;margin:8px 0;border:1px solid #eef0f2;border-radius:10px;"><table style="border-collapse:collapse;font-size:12px;width:100%;">';
+        t += "<thead><tr>" + header.map((h) => `<th style="padding:7px 10px;text-align:left;background:#f7f8fa;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;white-space:nowrap;">${inline(h)}</th>`).join("") + "</tr></thead><tbody>";
+        rows.forEach((r, ri) => {
+          t += `<tr style="background:${ri % 2 ? "#fbfbfc" : "#fff"};">` + r.map((c, ci) => `<td style="padding:7px 10px;border-bottom:1px solid #f1f2f4;${ci === 0 ? "font-weight:600;color:#374151;" : "color:#4b5563;"}">${inline(c)}</td>`).join("") + "</tr>";
+        });
+        out.push(t + "</tbody></table></div>");
+        continue;
+      }
+
+      const h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { closeList(); out.push(`<div style="font-weight:700;margin:8px 0 3px;font-size:13.5px;color:#111827;">${inline(h[2])}</div>`); i++; continue; }
+
+      if (/^\s*(---|\*\*\*|___)\s*$/.test(line)) { closeList(); out.push('<hr style="border:none;border-top:1px solid #eee;margin:8px 0;">'); i++; continue; }
+
+      const li = line.match(/^\s*[-*]\s+(.*)$/);
+      if (li) { if (!listOpen) { out.push('<ul style="margin:4px 0;padding-left:18px;">'); listOpen = true; } out.push(`<li>${inline(li[1])}</li>`); i++; continue; }
+
+      if (line.trim() === "") { closeList(); out.push("<br>"); i++; continue; }
+
+      closeList(); out.push(inline(line) + "<br>"); i++;
+    }
+    closeList();
+    return out.join("");
   }
 
-  function addMessage(role, text) {
+  /* extra = { products, followups }: persisted with the message so carousels
+     and chips survive page refresh / reopen (they're re-rendered on restore). */
+  function addMessage(role, text, extra) {
     const msg = document.createElement("div");
     msg.className = "saleshq-msg-enter";
     msg.style.cssText = `
@@ -546,28 +1153,12 @@
       justify-content: ${role === "user" ? "flex-end" : "flex-start"};
     `;
 
-    const isUser = role === "user";
-    const formattedText = parseMarkdown(text);
-    msg.innerHTML = `
-      <div style="
-        display: inline-block;
-        padding: 12px 16px;
-        border-radius: ${isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px"};
-        background: ${isUser ? "linear-gradient(135deg, #1a1a1a 0%, #333 100%)" : "#fff"};
-        color: ${isUser ? "#fff" : "#1a1a1a"};
-        max-width: 80%;
-        font-size: 14px;
-        line-height: 1.5;
-        box-shadow: ${isUser ? "none" : "0 2px 8px rgba(0,0,0,0.06)"};
-        word-wrap: break-word;
-      ">
-        ${formattedText}
-      </div>
-    `;
+    msg.innerHTML = bubbleHtml(role, parseMarkdown(text));
     messagesEl.appendChild(msg);
     messagesEl.scrollTop = messagesEl.scrollHeight;
 
-    state.history.push({ role, content: text });
+    state.history.push({ role, content: text, ...(extra || {}) });
+    state.lastMessageAt = Date.now();
     saveState();
   }
 
@@ -596,8 +1187,15 @@
   function createProductCard(product) {
     const card = document.createElement("div");
     card.className = "saleshq-product-card";
+    card.style.cursor = "pointer";
 
-    const placeholderImg = product.image || "https://via.placeholder.com/200x140/f5f5f5/999?text=Product";
+    const placeholderImg = product.imageUrl || "https://via.placeholder.com/200x140/f5f5f5/999?text=Product";
+    const priceLabel = `${product.currency || ''} ${product.price ?? '0'}`.trim();
+    const outOfStock = product.inStock === false;
+    const badgeText = product.badge || (outOfStock ? "Out of stock" : "");
+    const badge = badgeText
+      ? `<div style="font-size: 10px; font-weight: 600; color: ${/out of stock/i.test(badgeText) ? "#dc2626" : "#b45309"}; margin-bottom: 4px;">${badgeText}</div>`
+      : '';
 
     card.innerHTML = `
       <img
@@ -607,14 +1205,16 @@
           width: 100%;
           height: 120px;
           object-fit: cover;
+          ${outOfStock ? "filter: grayscale(0.6); opacity: 0.85;" : ""}
         "
       />
       <div style="padding: 12px;">
+        ${badge}
         <div style="font-weight: 600; font-size: 13px; margin-bottom: 6px; line-height: 1.3;">
           ${product.title || 'Product'}
         </div>
         <div style="font-weight: 700; font-size: 14px; margin-bottom: 10px;">
-          ₹${product.price?.amount || '0'}
+          ${priceLabel}
         </div>
         <button
           class="saleshq-add-to-cart"
@@ -622,25 +1222,35 @@
             width: 100%;
             padding: 10px;
             border-radius: 8px;
-            border: none;
-            background: #1a1a1a;
-            color: white;
+            border: ${outOfStock ? "1px solid #d1d5db" : "none"};
+            background: ${outOfStock ? "#fff" : "#1a1a1a"};
+            color: ${outOfStock ? "#1a1a1a" : "white"};
             font-size: 12px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s;
           "
         >
-          Add to Cart
+          ${outOfStock ? "View product" : "Add to Cart"}
         </button>
       </div>
     `;
 
+    const goToProduct = () => {
+      emitBot("bot_product_clicked", product); // keepalive — survives navigation
+      if (product.handle) window.location.href = `${getShopifyRoot()}products/${product.handle}`;
+    };
+
     const addBtn = card.querySelector(".saleshq-add-to-cart");
-    addBtn.onclick = () => {
+    addBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (outOfStock) { goToProduct(); return; } // can't cart it — show the page
       handleAddToCart(addBtn, product);
       document.dispatchEvent(new Event("cart:build"));
     };
+
+    // Clicking the card opens the product page on the storefront.
+    card.addEventListener("click", goToProduct);
 
     return card;
   }
@@ -700,6 +1310,8 @@
 
       // Also try to show theme's cart notification popup (bonus)
       showCartNotification(addedItems, cartData);
+
+      emitBot("bot_add_to_cart", product);
 
       button.innerText = "Added ✓";
       button.style.background = "#16a34a";
@@ -810,45 +1422,53 @@
     const text = input.value.trim();
     if (!text) return;
 
+    // First reply to a proactive popup = engagement; hand off to reactive (§9.3).
+    if (proactiveOpen && !state.history.some((m) => m.role === "user")) {
+      proactiveOpen = false;
+      try {
+        fetch(`${API_BASE}/engage`, { method: "POST", headers: { "Content-Type": "text/plain" }, keepalive: true,
+          body: JSON.stringify({ shopId: SHOP_ID, sessionId: SESSION_ID }) }).catch(() => {});
+      } catch (e) { /* ignore */ }
+    }
+
     addMessage("user", text);
     input.value = "";
 
     const typingEl = showTypingIndicator();
+    try { await flushEvents(); } catch (e) { /* chat context should include queued events */ }
 
     try {
-      const res = await fetch(
-        "https://replifyai-server.vercel.app/api/customer/query",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            query: text,
-            conversationHistory: state.history
-          })
-        }
-      );
+      if (!API_BASE) throw new Error("SalesHQ: apiBase not configured in theme settings");
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        // text/plain keeps it a "simple" CORS request (no preflight); server JSON-parses anyway
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({
+          shopId: SHOP_ID,
+          sessionId: SESSION_ID,
+          message: text,
+          // strip client-only fields (products/followups) — server wants role+content
+          history: state.history.slice(-10).map((m) => ({ role: m.role, content: m.content }))
+        })
+      });
 
       const data = await res.json();
-
       typingEl.remove();
 
-      addMessage("assistant", data.response);
+      if (!res.ok || data.serviceStopped) {
+        addMessage("assistant", data.message || data.response || "The assistant is temporarily unavailable. Please check back soon.");
+        return;
+      }
 
-if (
-  data.intent?.type === "product_inquiry" &&
-  data.recommendations &&
-  data.recommendations.products &&
-  data.recommendations.products.length
-) {
-  renderProductCarousel(data.recommendations.products);
-}
+      addMessage("assistant", data.response, { products: data.products || [], followups: data.followups || [] });
 
-// Show suggested follow-up questions
-if (data.suggestedFollowups && data.suggestedFollowups.length) {
-  renderFollowups(data.suggestedFollowups);
-}
+      if (data.products && data.products.length) {
+        renderProductCarousel(data.products);
+      }
+
+      if (data.followups && data.followups.length) {
+        renderFollowups(data.followups);
+      }
     } catch (err) {
       typingEl.remove();
       addMessage(

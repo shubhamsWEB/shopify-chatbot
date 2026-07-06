@@ -1,15 +1,22 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "b8e6d266055067bc67022f6713f66bcd"
-name = "saleshq-chatbot"
-application_url = "https://example.com"
+client_id = "f793b6bc9f0a90c7894db5b13d80d39f"
+name = "SalesHQ AI Shopping Assistant"
+application_url = "https://saleshq-chatbot.vercel.app"
 embedded = true
 
 [build]
-automatically_update_urls_on_dev = true
+# Keep false so `shopify app dev` never overwrites the prod application_url.
+automatically_update_urls_on_dev = false
 
 [webhooks]
-api_version = "2026-04"
+api_version = "2026-07"
+
+  # Mandatory GDPR/privacy compliance webhooks (Shopify App Store requirement).
+  [webhooks.privacy_compliance]
+  customer_data_request_url = "/webhooks/customers/data_request"
+  customer_deletion_url = "/webhooks/customers/redact"
+  shop_deletion_url = "/webhooks/shop/redact"
 
   [[webhooks.subscriptions]]
   topics = [ "app/uninstalled" ]
@@ -19,9 +26,34 @@ api_version = "2026-04"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+  # Intent engine — transaction-grade events (spec §4.1)
+  [[webhooks.subscriptions]]
+  topics = [
+    "carts/create",
+    "carts/update",
+    "checkouts/create",
+    "checkouts/update",
+    "orders/create",
+    "orders/paid"
+  ]
+  uri = "/webhooks/events"
+
+# Widget + pixel call the app through the App Proxy so Shopify HMAC-signs every
+# request with the real shop — shopId can't be spoofed and there's no CORS.
+# Storefront path: https://{shop}/apps/saleshq/* → {application_url}/proxy/*
+[app_proxy]
+url = "https://saleshq-chatbot.vercel.app/proxy"
+subpath = "saleshq"
+prefix = "apps"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products"
+scopes = "read_orders,read_customers,unauthenticated_read_product_listings,write_pixels,read_customer_events"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://saleshq-chatbot.vercel.app/auth/callback",
+  "https://saleshq-chatbot.vercel.app/auth/shopify/callback",
+  "https://saleshq-chatbot.vercel.app/api/auth",
+  "https://saleshq-chatbot.vercel.app/api/auth/callback"
+]

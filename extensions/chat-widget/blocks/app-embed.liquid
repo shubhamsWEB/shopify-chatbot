@@ -2,8 +2,78 @@
 {
   "name": "SalesHQ Chat Widget",
   "target": "body",
-  "settings": []
+  "settings": [
+    {
+      "type": "header",
+      "content": "Appearance"
+    },
+    {
+      "type": "checkbox",
+      "id": "auto_match",
+      "label": "Auto-match my theme",
+      "info": "Automatically use your store's brand color and font. Turn off to set a color manually below.",
+      "default": true
+    },
+    {
+      "type": "color",
+      "id": "primary_color",
+      "label": "Brand color (manual)",
+      "info": "Used when auto-match is off. Sets the chat bubble, buttons, and the shopper's messages.",
+      "default": "#1a1a1a"
+    },
+    {
+      "type": "text",
+      "id": "header_title",
+      "label": "Assistant name",
+      "default": "SalesHQ Assistant"
+    },
+    {
+      "type": "text",
+      "id": "header_subtitle",
+      "label": "Assistant tagline",
+      "default": "Always here to help"
+    },
+    {
+      "type": "select",
+      "id": "position",
+      "label": "Position",
+      "options": [
+        { "value": "right", "label": "Bottom right" },
+        { "value": "left", "label": "Bottom left" }
+      ],
+      "default": "right"
+    },
+    {
+      "type": "select",
+      "id": "launcher_icon",
+      "label": "Launcher icon",
+      "options": [
+        { "value": "chat", "label": "Chat bubble" },
+        { "value": "sparkle", "label": "Sparkle" },
+        { "value": "bag", "label": "Shopping bag" },
+        { "value": "help", "label": "Question mark" }
+      ],
+      "default": "chat"
+    }
+  ]
 }
 {% endschema %}
 
+{% comment %}
+  No Backend URL setting needed: the widget calls the app through the Shopify
+  App Proxy at /apps/saleshq/* (same-origin, request HMAC-signed with the shop).
+  Appearance settings above are merchant-editable in the theme editor and passed
+  to the widget via window.__SALESHQ_CONFIG__.
+{% endcomment %}
+<script>
+  window.__SALESHQ_CONFIG__ = {
+    shopId: {{ shop.permanent_domain | json }},
+    autoMatch: {{ block.settings.auto_match | default: true | json }},
+    primaryColor: {{ block.settings.primary_color | default: '#1a1a1a' | json }},
+    headerTitle: {{ block.settings.header_title | default: 'SalesHQ Assistant' | json }},
+    headerSubtitle: {{ block.settings.header_subtitle | default: 'Always here to help' | json }},
+    position: {{ block.settings.position | default: 'right' | json }},
+    launcherIcon: {{ block.settings.launcher_icon | default: 'chat' | json }}
+  };
+</script>
 <script src="{{ 'chat-widget.js' | asset_url }}" defer></script>

@@ -21,9 +21,10 @@ export default function App() {
   return (
     <div className={styles.index}>
       <div className={styles.content}>
-        <h1 className={styles.heading}>A short heading about [your app]</h1>
+        <h1 className={styles.heading}>SalesHQ — Intent-driven shopping assistant</h1>
         <p className={styles.text}>
-          A tagline about [your app] that describes your value proposition.
+          Silently captures shopper behavior, builds a per-shopper intent profile in real time, and powers a grounded,
+          proactive storefront assistant — plus an analytics dashboard for the merchant.
         </p>
         {showForm && (
           <Form className={styles.form} method="post" action="/auth/login">
@@ -38,18 +39,9 @@ export default function App() {
           </Form>
         )}
         <ul className={styles.list}>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
-          <li>
-            <strong>Product feature</strong>. Some detail about your feature and
-            its benefit to your customer.
-          </li>
+          <li><strong>Real-time intent</strong>. Web Pixel + webhooks → a live per-shopper intent profile.</li>
+          <li><strong>Grounded assistant</strong>. Recommends, compares, and proactively helps — only with live store data.</li>
+          <li><strong>Merchant analytics</strong>. Funnels, semantic cohorts, and an analytics assistant in your admin.</li>
         </ul>
       </div>
     </div>

@@ -1,0 +1,23 @@
+api_version = "2026-04"
+
+[[extensions]]
+name = "intent-pixel"
+handle = "intent-pixel"
+uid = "c3a74b7c-7f4a-28a9-d492-0aba466b70821e223e33"
+type = "web_pixel_extension"
+runtime_context = "strict"
+
+  [extensions.customer_privacy]
+  analytics = true
+  marketing = false
+  preferences = false
+  sale_of_data = "enabled"
+
+  # ingestUrl is set per-shop at install time via the webPixelCreate mutation.
+  [extensions.settings]
+  type = "object"
+
+    [extensions.settings.fields.ingestUrl]
+    name = "Ingest URL"
+    description = "Backend endpoint that receives canonical events"
+    type = "single_line_text_field"
