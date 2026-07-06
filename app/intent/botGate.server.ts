@@ -4,6 +4,7 @@
 import { getBackofficeMeta } from "./settings.server";
 import { monthlyReplies } from "./transcript.server";
 import { monthlyCostUsd } from "./usage.server";
+import { trialExpired } from "./billing.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -24,7 +25,7 @@ export async function assertBotOperational(
   opts?: { cors?: boolean },
 ): Promise<Response | null> {
   const backoffice = await getBackofficeMeta(shop);
-  if (backoffice.botEnabled === false) {
+  if (backoffice.botEnabled === false || trialExpired(backoffice)) {
     return Response.json(serviceStoppedBody(), { status: 503, headers: opts?.cors ? CORS : undefined });
   }
   const [replies, costUsd] = await Promise.all([monthlyReplies(shop), monthlyCostUsd(shop)]);

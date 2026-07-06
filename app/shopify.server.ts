@@ -10,8 +10,9 @@ import type { BillingConfigSubscriptionLineItemPlan } from "@shopify/shopify-api
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { PLANS, PLAN_NAMES, TRIAL_DAYS, ENTRY_PLAN } from "./intent/plans";
+import type { AdminGraphql } from "./intent/storefront-token.server";
 
-// Tiered subscriptions, all with a 14-day free trial. app.tsx gates on ANY
+// Tiered subscriptions, all with the configured free trial. app.tsx syncs ANY
 // active plan; the active tier drives the storefront convo cap (see
 // billing.server → syncBilling). isTest is on outside production so dev stores
 // aren't charged. PLAN kept as the default/entry tier for existing callers.
@@ -35,7 +36,7 @@ export const BILLING: Record<string, BillingConfigSubscriptionLineItemPlan> = Ob
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
-  apiVersion: ApiVersion.October25,
+  apiVersion: ApiVersion.April26,
   scopes: process.env.SCOPES?.split(","),
   appUrl: process.env.SHOPIFY_APP_URL || "",
   authPathPrefix: "/auth",
@@ -56,13 +57,13 @@ const shopify = shopifyApp({
       // Dynamic import keeps shopify.server free of a load-time cycle.
       try {
         const { createAndStoreStorefrontToken } = await import("./intent/storefront-token.server");
-        await createAndStoreStorefrontToken(admin as any, session.shop);
+        await createAndStoreStorefrontToken(admin as unknown as AdminGraphql, session.shop);
       } catch (err) {
         console.error("storefront token mint failed:", (err as Error).message);
       }
 
       // Connect the Web Pixel, pointing it at our ingestion endpoint (spec §4.4).
-      const ingestUrl = `${process.env.SHOPIFY_APP_URL}/api/ingest`;
+      const ingestUrl = `https://${session.shop}/apps/saleshq/ingest`;
       try {
         const res = await admin.graphql(
           `#graphql
@@ -89,7 +90,7 @@ const shopify = shopifyApp({
 });
 
 export default shopify;
-export const apiVersion = ApiVersion.October25;
+export const apiVersion = ApiVersion.April26;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 export const authenticate = shopify.authenticate;
 export const unauthenticated = shopify.unauthenticated;
@@ -103,7 +104,7 @@ export const sessionStorage = shopify.sessionStorage;
 const webhookValidator = shopifyApi({
   apiKey: process.env.SHOPIFY_API_KEY || "",
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
-  apiVersion: ApiVersion.October25,
+  apiVersion: ApiVersion.April26,
   scopes: process.env.SCOPES?.split(",") ?? [],
   hostName: "webhook-validator",
   isEmbeddedApp: true,

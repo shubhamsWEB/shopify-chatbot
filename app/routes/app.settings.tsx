@@ -24,6 +24,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     welcomeMessage: String(form.get("welcomeMessage") ?? ""),
     config,
     backoffice: existing.backoffice, // developer-managed; merchant saves must not clear it
+    shopInfo: existing.shopInfo, // synced from Shopify; merchant saves must not clear it
   });
   return { saved: true, at: Date.now() };
 };
@@ -86,7 +87,7 @@ export default function Settings() {
           />
           <s-text tone="neutral">{`${brand.length}/2000`}</s-text>
           <s-text tone="neutral">
-            Welcome message — the chat's opening line. Leave empty for the built-in intro that lists what the
+            Welcome message — the chat&apos;s opening line. Leave empty for the built-in intro that lists what the
             assistant can do (find products, compare items, personalized picks, answer questions).
           </s-text>
           <textarea

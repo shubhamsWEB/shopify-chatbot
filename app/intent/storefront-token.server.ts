@@ -5,7 +5,7 @@
 // refreshes the expiring offline access token.
 import prisma from "../db.server";
 
-interface AdminGraphql {
+export interface AdminGraphql {
   graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
 }
 
@@ -20,9 +20,16 @@ const MUTATION = `#graphql
 // Create a Storefront token using an in-hand Admin client and persist it.
 export async function createAndStoreStorefrontToken(admin: AdminGraphql, shop: string): Promise<string> {
   const res = await admin.graphql(MUTATION, { variables: { input: { title: "saleshq-chatbot" } } });
-  const body = (await res.json()) as any;
-  const errs = body?.data?.storefrontAccessTokenCreate?.userErrors;
-  const token = body?.data?.storefrontAccessTokenCreate?.storefrontAccessToken?.accessToken;
+  const body = (await res.json()) as {
+    data?: {
+      storefrontAccessTokenCreate?: {
+        storefrontAccessToken?: { accessToken?: string };
+        userErrors?: unknown[];
+      };
+    };
+  };
+  const errs = body.data?.storefrontAccessTokenCreate?.userErrors;
+  const token = body.data?.storefrontAccessTokenCreate?.storefrontAccessToken?.accessToken;
   if (!token) throw new Error(`storefrontAccessTokenCreate failed: ${JSON.stringify(errs ?? body)}`);
   await prisma.storefrontToken.upsert({
     where: { shop },

@@ -8,17 +8,16 @@ import { authenticate } from "../shopify.server";
 import { getOverview } from "../intent/analytics.server";
 import { TrendChart, FunnelBars, CategoryBars, Donut } from "../components/charts";
 
-// Theme app-embed deep link — opens the theme editor with the SalesHQ widget
-// embed pre-activated so the merchant can enable it in one click (App Store
-// requirement 5.1.3). UUID = the app's published theme-app-extension UUID
-// (from the production asset path cdn.shopify.com/extensions/<UUID>/...), NOT
-// the CLI-local `uid` in shopify.extension.toml. handle = app-embed block.
-const EMBED_UUID = "019f2871-06a2-7e31-b197-4606606e6272";
+// Theme app-embed deep link — Shopify expects the app API key/client ID plus
+// the app-embed block handle, not the extension UUID.
+const FALLBACK_APP_API_KEY = "f793b6bc9f0a90c7894db5b13d80d39f";
 const EMBED_HANDLE = "app-embed";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  const deepLink = `https://${session.shop}/admin/themes/current/editor?context=apps&activateAppId=${EMBED_UUID}/${EMBED_HANDLE}`;
+  // eslint-disable-next-line no-undef
+  const appApiKey = process.env.SHOPIFY_API_KEY || FALLBACK_APP_API_KEY;
+  const deepLink = `https://${session.shop}/admin/themes/current/editor?context=apps&activateAppId=${appApiKey}/${EMBED_HANDLE}`;
   return { overview: await getOverview(session.shop), embedDeepLink: deepLink };
 };
 
@@ -66,9 +65,7 @@ function SetupSection({ deepLink }: { deepLink: string }) {
       </s-stack>
       <s-stack direction="inline" gap="small">
         {/* target=_top breaks out of the embedded iframe into the admin so the theme editor loads. */}
-        <a href={deepLink} target="_top" rel="noreferrer" style={{ textDecoration: "none" }}>
-          <s-button variant="primary">Enable in theme editor</s-button>
-        </a>
+        <s-button variant="primary" href={deepLink} target="_top">Enable in theme editor</s-button>
       </s-stack>
     </s-section>
   );

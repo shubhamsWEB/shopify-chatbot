@@ -10,7 +10,7 @@ register(({ analytics, browser, init }) => {
   // it with the real shop, the server derives shopId (can't be spoofed).
   const shopId = init?.data?.shop?.myshopifyDomain;
   if (!shopId) return;
-  const ingestUrl = `https://${shopId}/apps/saleshq/ingest`;
+  const ingestUrl = init?.settings?.ingestUrl || `https://${shopId}/apps/saleshq/ingest`;
 
   // Stable per-browser session id in a FIRST-PARTY COOKIE so the chat widget
   // (running on the main page, outside this sandbox) reads the same id and the

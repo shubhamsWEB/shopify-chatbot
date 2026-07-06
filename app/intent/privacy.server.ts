@@ -11,6 +11,8 @@ export async function purgeShop(shop: string): Promise<void> {
     prisma.intentProfile.deleteMany({ where: { shopId: shop } }),
     prisma.storefrontToken.deleteMany({ where: { shop } }),
     prisma.session.deleteMany({ where: { shop } }),
+    prisma.shopSettings.deleteMany({ where: { shop } }),
+    prisma.llmUsage.deleteMany({ where: { shop } }),
     prisma.chatTranscript.deleteMany({ where: { shop } }).catch(() => {}), // table may not exist yet
     prisma.eventRollup.deleteMany({ where: { shop } }).catch(() => {}),
   ]);
@@ -46,5 +48,9 @@ export async function exportCustomer(shop: string, customerId: string) {
     prisma.event.findMany({ where: { shopId: shop, customerId } }),
     prisma.intentProfile.findMany({ where: { shopId: shop, customerId } }),
   ]);
-  return { shop, customerId, events, profiles, generatedAt: new Date().toISOString() };
+  const sessionIds = [...new Set(events.map((e) => e.sessionId).filter(Boolean))];
+  const transcripts = sessionIds.length
+    ? await prisma.chatTranscript.findMany({ where: { shop, sessionId: { in: sessionIds } } }).catch(() => [])
+    : [];
+  return { shop, customerId, events, profiles, transcripts, generatedAt: new Date().toISOString() };
 }

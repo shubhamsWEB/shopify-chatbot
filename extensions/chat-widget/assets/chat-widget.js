@@ -40,6 +40,95 @@
   const API_BASE = "/apps/saleshq";
   const SHOP_ID = CONFIG.shopId || location.host; // legacy field; server ignores it
 
+  /* Theme defaults: the embed enables auto-match by default. Prefer explicit
+     theme button/accent tokens, then visible theme buttons, then the manual
+     setting when auto-match is off. */
+  const DEFAULT_PRIMARY = "#1a1a1a";
+  function cssColor(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (/^\d+\s*,\s*\d+\s*,\s*\d+(?:\s*,\s*[\d.]+)?$/.test(raw)) return `rgb(${raw})`;
+    return raw;
+  }
+  function colorToRgb(value) {
+    const probe = document.createElement("span");
+    probe.style.color = "";
+    probe.style.color = cssColor(value);
+    if (!probe.style.color) return null;
+    document.body.appendChild(probe);
+    const rgb = getComputedStyle(probe).color;
+    probe.remove();
+    const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+    if (!m || (m[4] !== undefined && Number(m[4]) < 0.2)) return null;
+    return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]) };
+  }
+  function rgbToHex(rgb) {
+    return "#" + [rgb.r, rgb.g, rgb.b].map((n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0")).join("");
+  }
+  function luminance(rgb) {
+    const linear = [rgb.r, rgb.g, rgb.b].map((v) => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+  }
+  function usablePrimary(value) {
+    const rgb = colorToRgb(value);
+    if (!rgb) return "";
+    if (luminance(rgb) > 0.92) return "";
+    return rgbToHex(rgb);
+  }
+  function adjustColor(hex, amount) {
+    const rgb = colorToRgb(hex) || colorToRgb(DEFAULT_PRIMARY);
+    const adjusted = {
+      r: rgb.r + (amount < 0 ? rgb.r : 255 - rgb.r) * amount,
+      g: rgb.g + (amount < 0 ? rgb.g : 255 - rgb.g) * amount,
+      b: rgb.b + (amount < 0 ? rgb.b : 255 - rgb.b) * amount,
+    };
+    return rgbToHex(adjusted);
+  }
+  function resolveTheme() {
+    const manual = usablePrimary(CONFIG.primaryColor) || DEFAULT_PRIMARY;
+    if (CONFIG.autoMatch === false) return { primary: manual, primaryHover: adjustColor(manual, -0.18), onPrimary: luminance(colorToRgb(manual)) > 0.55 ? "#111827" : "#fff" };
+
+    const root = getComputedStyle(document.documentElement);
+    const body = getComputedStyle(document.body);
+    const vars = [
+      "--color-button",
+      "--color-primary",
+      "--color-accent",
+      "--color-link",
+      "--color-base-accent-1",
+      "--color-foreground",
+      "--color-base-text",
+    ];
+    for (const name of vars) {
+      const picked = usablePrimary(root.getPropertyValue(name) || body.getPropertyValue(name));
+      if (picked) return { primary: picked, primaryHover: adjustColor(picked, -0.18), onPrimary: luminance(colorToRgb(picked)) > 0.55 ? "#111827" : "#fff" };
+    }
+
+    const selectors = [
+      "button[name='add']",
+      ".product-form__submit",
+      ".shopify-payment-button__button",
+      "button[type='submit']",
+      "a.button",
+      ".button",
+      ".btn",
+    ];
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (!el) continue;
+      const styles = getComputedStyle(el);
+      const picked = usablePrimary(styles.backgroundColor) || usablePrimary(styles.borderColor) || usablePrimary(styles.color);
+      if (picked) return { primary: picked, primaryHover: adjustColor(picked, -0.18), onPrimary: luminance(colorToRgb(picked)) > 0.55 ? "#111827" : "#fff" };
+    }
+
+    return { primary: manual, primaryHover: adjustColor(manual, -0.18), onPrimary: luminance(colorToRgb(manual)) > 0.55 ? "#111827" : "#fff" };
+  }
+  const THEME = resolveTheme();
+  const PRIMARY_GRADIENT = `linear-gradient(135deg, ${THEME.primary} 0%, ${THEME.primaryHover} 100%)`;
+
   /* Consent: honor the Shopify Customer Privacy API. When analytics consent is
      not granted we keep the chat working but DON'T persist a tracking cookie,
      run proactive popups, or emit behavioral events. */
@@ -215,11 +304,11 @@
     }
     .saleshq-input:focus {
       outline: none;
-      border-color: #1a1a1a !important;
+      border-color: ${THEME.primary} !important;
       background: #fff !important;
     }
     .saleshq-send-btn:hover {
-      background: #333 !important;
+      background: ${THEME.primaryHover} !important;
     }
     .saleshq-send-btn:active {
       transform: scale(0.95);
@@ -305,8 +394,8 @@
       width: 100%;
       padding: 8px;
       margin-top: 8px;
-      background: #1a1a1a;
-      color: #fff;
+      background: ${THEME.primary};
+      color: ${THEME.onPrimary};
       border: none;
       border-radius: 6px;
       font-size: 11px;
@@ -317,7 +406,7 @@
       transition: background 0.2s;
     }
     .saleshq-product-btn:hover {
-      background: #333;
+      background: ${THEME.primaryHover};
     }
     /* Follow-up Chips Styles */
     .saleshq-followups {
@@ -418,12 +507,12 @@
       transition: all 0.2s;
     }
     .saleshq-cart-toast-btn--primary {
-      background: #1a1a1a;
-      color: #fff;
+      background: ${THEME.primary};
+      color: ${THEME.onPrimary};
       border: none;
     }
     .saleshq-cart-toast-btn--primary:hover {
-      background: #333;
+      background: ${THEME.primaryHover};
     }
     .saleshq-cart-toast-btn--secondary {
       background: #fff;
@@ -463,20 +552,6 @@
     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <line x1="22" y1="2" x2="11" y2="13"/>
       <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-    </svg>
-  `;
-
-  /* Chevron left icon SVG */
-  const chevronLeftSvg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="15 18 9 12 15 6"/>
-    </svg>
-  `;
-
-  /* Chevron right icon SVG */
-  const chevronRightSvg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="9 18 15 12 9 6"/>
     </svg>
   `;
 
@@ -534,8 +609,8 @@
     right: 24px;
     width: 60px;
     height: 60px;
-    background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
-    color: white;
+    background: ${PRIMARY_GRADIENT};
+    color: ${THEME.onPrimary};
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -576,8 +651,8 @@
   chat.innerHTML = `
     <div style="
       padding: 18px 20px;
-      background: linear-gradient(135deg, #1a1a1a 0%, #333 100%);
-      color: white;
+      background: ${PRIMARY_GRADIENT};
+      color: ${THEME.onPrimary};
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -598,7 +673,7 @@
       <button id="saleshq-close" class="saleshq-close-btn" style="
         background: transparent;
         border: none;
-        color: white;
+        color: ${THEME.onPrimary};
         cursor: pointer;
         padding: 6px;
         display: flex;
@@ -659,8 +734,8 @@
         width: 42px;
         height: 42px;
         border: none;
-        background: #1a1a1a;
-        color: white;
+        background: ${THEME.primary};
+        color: ${THEME.onPrimary};
         border-radius: 50%;
         cursor: pointer;
         display: flex;
@@ -1079,8 +1154,8 @@
       display:inline-block;
       padding:10px 14px;
       border-radius:${isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px"};
-      background:${isUser ? "linear-gradient(135deg,#1a1a1a,#333)" : "#fff"};
-      color:${isUser ? "#fff" : "#1f2937"};
+      background:${isUser ? PRIMARY_GRADIENT : "#fff"};
+      color:${isUser ? THEME.onPrimary : "#1f2937"};
       max-width:${isUser ? "82%" : "96%"};
       font-size:14px;line-height:1.5;letter-spacing:-0.1px;
       box-shadow:${isUser ? "none" : "0 1px 2px rgba(0,0,0,0.08)"};
@@ -1223,8 +1298,8 @@
             padding: 10px;
             border-radius: 8px;
             border: ${outOfStock ? "1px solid #d1d5db" : "none"};
-            background: ${outOfStock ? "#fff" : "#1a1a1a"};
-            color: ${outOfStock ? "#1a1a1a" : "white"};
+            background: ${outOfStock ? "#fff" : THEME.primary};
+            color: ${outOfStock ? "#1a1a1a" : THEME.onPrimary};
             font-size: 12px;
             font-weight: 600;
             cursor: pointer;
@@ -1318,7 +1393,7 @@
   
       setTimeout(() => {
         button.innerText = "Add to Cart";
-        button.style.background = "#1a1a1a";
+        button.style.background = THEME.primary;
         button.disabled = false;
         button.style.opacity = "1";
         button.dataset.loading = "false";
@@ -1329,7 +1404,7 @@
   
       setTimeout(() => {
         button.innerText = "Add to Cart";
-        button.style.background = "#1a1a1a";
+        button.style.background = THEME.primary;
         button.disabled = false;
         button.style.opacity = "1";
         button.dataset.loading = "false";

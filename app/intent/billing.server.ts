@@ -3,12 +3,13 @@
 // the merchant's active tier becomes their plan + monthly convo cap, with no
 // extra storefront code (proxy.chat → assertBotOperational reads convoLimit).
 import type { authenticate } from "../shopify.server";
-import { PLANS, PLAN_NAMES, capForPlan, costCapForPlan, TRIAL_REPLY_CAP, TRIAL_COST_CAP_USD, type PlanName } from "./plans";
-import { getBackofficeMeta, saveBackoffice } from "./settings.server";
+import { ENTRY_PLAN, PLANS, PLAN_NAMES, TRIAL_DAYS, capForPlan, costCapForPlan, TRIAL_REPLY_CAP, TRIAL_COST_CAP_USD, type PlanName } from "./plans";
+import { getBackofficeMeta, saveBackoffice, type BackofficeMeta } from "./settings.server";
 
 type AdminCtx = Awaited<ReturnType<typeof authenticate.admin>>;
 type Billing = AdminCtx["billing"];
 type Admin = AdminCtx["admin"];
+type BillingState = { meta: BackofficeMeta; activePlan: PlanName | null; trialActive: boolean };
 
 /** Highest-priced active plan for this shop, or null if none active. */
 async function activePlan(billing: Billing, isTest: boolean): Promise<PlanName | null> {
@@ -27,6 +28,14 @@ const SUB_QUERY = `#graphql
   }`;
 
 type SubStatus = { status: "trial" | "active"; trialEndsAt: string | null };
+
+export function trialActive(meta: BackofficeMeta): boolean {
+  return meta.status === "trial" && !!meta.trialEndsAt && Date.now() < new Date(meta.trialEndsAt).getTime();
+}
+
+export function trialExpired(meta: BackofficeMeta): boolean {
+  return meta.status === "trial_expired" || (meta.status === "trial" && !!meta.trialEndsAt && Date.now() >= new Date(meta.trialEndsAt).getTime());
+}
 
 /** Trial vs active + trial-end for the given plan, via the subscription's
  * createdAt + trialDays. Fail-soft → treated as active if unknown. */
@@ -55,26 +64,57 @@ async function subStatus(admin: Admin, plan: PlanName): Promise<SubStatus> {
  * developer comps aren't overwritten, and only writes when something changed.
  */
 export async function syncBilling(shop: string, billing: Billing, admin: Admin, isTest: boolean): Promise<void> {
+  await ensureBillingState(shop, billing, admin, isTest);
+}
+
+/**
+ * Keep billing/backoffice state current without forcing Shopify plan approval on
+ * first install. New installs get an internal capped trial; paid approval is
+ * requested only from the Plan & usage page.
+ */
+export async function ensureBillingState(shop: string, billing: Billing, admin: Admin, isTest: boolean): Promise<BillingState> {
   try {
     const meta = await getBackofficeMeta(shop);
-    if ((meta.plan ?? "").toLowerCase() === "comped") return; // manual override wins
+    if ((meta.plan ?? "").toLowerCase() === "comped") return { meta, activePlan: null, trialActive: false }; // manual override wins
 
     const plan = await activePlan(billing, isTest);
-    if (!plan) return; // no active subscription — leave meta as-is
-
-    const { status, trialEndsAt } = await subStatus(admin, plan);
-    // During the trial, apply the low trial caps (both replies and $), not the
-    // plan's — a 7-day unpaid store can't run up cost. After trial → plan caps.
-    const convoLimit = status === "trial" ? TRIAL_REPLY_CAP : capForPlan(plan);
-    const costCapUsd = status === "trial" ? TRIAL_COST_CAP_USD : costCapForPlan(plan);
-    if (
-      meta.plan === plan && meta.convoLimit === convoLimit && meta.costCapUsd === costCapUsd &&
-      meta.status === status && meta.trialEndsAt === trialEndsAt
-    ) {
-      return; // no change
+    if (plan) {
+      const { status, trialEndsAt } = await subStatus(admin, plan);
+      // During the Shopify trial, apply the low trial caps (both replies and $),
+      // not the plan's. After trial → plan caps.
+      const convoLimit = status === "trial" ? TRIAL_REPLY_CAP : capForPlan(plan);
+      const costCapUsd = status === "trial" ? TRIAL_COST_CAP_USD : costCapForPlan(plan);
+      const next = { ...meta, plan, convoLimit, costCapUsd, status, trialEndsAt };
+      if (
+        meta.plan !== plan || meta.convoLimit !== convoLimit || meta.costCapUsd !== costCapUsd ||
+        meta.status !== status || meta.trialEndsAt !== trialEndsAt
+      ) {
+        await saveBackoffice(shop, next);
+      }
+      return { meta: next, activePlan: plan, trialActive: status === "trial" };
     }
-    await saveBackoffice(shop, { ...meta, plan, convoLimit, costCapUsd, status, trialEndsAt });
+
+    if (trialActive(meta)) return { meta, activePlan: null, trialActive: true };
+
+    if (trialExpired(meta)) {
+      const next = { ...meta, status: "trial_expired", trialEndsAt: meta.trialEndsAt ?? null, convoLimit: 0, costCapUsd: 0 };
+      if (meta.status !== next.status || meta.convoLimit !== 0 || meta.costCapUsd !== 0) await saveBackoffice(shop, next);
+      return { meta: next, activePlan: null, trialActive: false };
+    }
+
+    const trialEndsAt = new Date(Date.now() + TRIAL_DAYS * 86_400_000).toISOString();
+    const next = {
+      ...meta,
+      plan: meta.plan ?? ENTRY_PLAN,
+      convoLimit: TRIAL_REPLY_CAP,
+      costCapUsd: TRIAL_COST_CAP_USD,
+      status: "trial",
+      trialEndsAt,
+    };
+    await saveBackoffice(shop, next);
+    return { meta: next, activePlan: null, trialActive: true };
   } catch (err) {
     console.error("[billing] sync failed:", (err as Error).message);
+    return { meta: await getBackofficeMeta(shop), activePlan: null, trialActive: false };
   }
 }

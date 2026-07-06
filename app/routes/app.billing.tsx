@@ -13,13 +13,13 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { PLANS, PLAN_NAMES, capForPlan, findPlan, TRIAL_DAYS, TRIAL_REPLY_CAP, type PlanName } from "../intent/plans";
 import { monthlyReplies } from "../intent/transcript.server";
-import { getBackofficeMeta } from "../intent/settings.server";
+import { ensureBillingState } from "../intent/billing.server";
 
 // eslint-disable-next-line no-undef
 const isTest = () => process.env.SHOPIFY_BILLING_TEST !== "false";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session, billing } = await authenticate.admin(request);
+  const { admin, session, billing } = await authenticate.admin(request);
   const shop = session.shop;
 
   // Upgrade/downgrade request — throws a redirect to Shopify's approval page.
@@ -44,21 +44,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
   }
 
-  const [check, used, meta] = await Promise.all([
-    billing.check({ plans: PLAN_NAMES, isTest: isTest() }).catch(() => ({ hasActivePayment: false, appSubscriptions: [] as { name?: string }[] })),
+  const [state, used] = await Promise.all([
+    ensureBillingState(shop, billing, admin, isTest()),
     monthlyReplies(shop),
-    getBackofficeMeta(shop),
   ]);
+  const meta = state.meta;
 
-  const activeName = check.appSubscriptions?.[0]?.name ?? null;
   const comped = (meta.plan ?? "").toLowerCase() === "comped";
   // Effective plan the storefront enforces: comp overrides billing.
-  const current: PlanName | null = comped ? null : findPlan(activeName);
+  const current: PlanName | null = comped ? null : state.activePlan;
   // Effective reply cap actually enforced (trial cap during trial, else plan) —
   // billing sync writes it to meta.convoLimit; fall back to the plan's.
   const cap = comped ? null : (meta.convoLimit ?? capForPlan(current));
 
   const inTrial = !comped && meta.status === "trial" && !!meta.trialEndsAt;
+  const trialExpired = !comped && meta.status === "trial_expired";
   const trialDaysLeft = inTrial ? Math.max(0, Math.ceil((new Date(meta.trialEndsAt!).getTime() - Date.now()) / 86_400_000)) : 0;
 
   return {
@@ -67,6 +67,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     botEnabled: meta.botEnabled !== false,
     billingError,
     inTrial,
+    trialExpired,
     trialDaysLeft,
     trialEndsAt: inTrial ? meta.trialEndsAt! : null,
     used,
@@ -79,7 +80,7 @@ export default function Billing() {
   const data = useLoaderData<typeof loader>();
   // When the loader handled an upgrade it returned a redirect (no page data).
   if (!data || !("plans" in data)) return null;
-  const { current, comped, botEnabled, billingError, inTrial, trialDaysLeft, trialEndsAt, used, cap, plans } = data;
+  const { current, comped, botEnabled, billingError, inTrial, trialExpired, trialDaysLeft, trialEndsAt, used, cap, plans } = data;
   const trialEndLabel = trialEndsAt ? new Date(trialEndsAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
   const pct = cap ? Math.min(100, Math.round((used / cap) * 100)) : 0;
   const over = cap != null && used >= cap;
@@ -90,7 +91,7 @@ export default function Billing() {
     <s-page heading="Plan & usage">
       {billingError && (
         <s-banner tone="critical" heading="Couldn't start checkout">
-          Billing isn't available for this app install yet. This happens when the app isn't set to public or Custom distribution in the Shopify Partner Dashboard. Once distribution is configured, plan selection will work.
+          Billing isn&apos;t available for this app install yet. This happens when the app isn&apos;t set to public or Custom distribution in the Shopify Partner Dashboard. Once distribution is configured, plan selection will work.
         </s-banner>
       )}
       {!botEnabled && (
@@ -103,6 +104,11 @@ export default function Billing() {
           Your assistant is paused until the counter resets on the 1st, or upgrade below to raise the limit right away.
         </s-banner>
       )}
+      {trialExpired && botEnabled && (
+        <s-banner tone="warning" heading="Free trial ended">
+          Choose a plan below to continue using the SalesHQ assistant on your storefront.
+        </s-banner>
+      )}
 
       <s-section heading="This month's usage">
         <s-paragraph>
@@ -111,7 +117,9 @@ export default function Billing() {
               ? "Complimentary account — unlimited AI replies."
               : current
                 ? `Current plan: `
-                : "No active subscription."}
+                : inTrial
+                  ? "Free trial — no plan approval needed yet."
+                  : "No active subscription."}
           </s-text>
           {current && <s-text><b>{current}</b></s-text>}
           {inTrial && (
@@ -122,7 +130,7 @@ export default function Billing() {
         </s-paragraph>
         {inTrial && (
           <s-paragraph>
-            <s-text tone="neutral">You&apos;re on a free trial. First charge on {trialEndLabel} unless you cancel. Your assistant is fully active during the trial.</s-text>
+            <s-text tone="neutral">You&apos;re on a free trial until {trialEndLabel}. Choose a plan any time; Shopify approval starts billing after the trial terms shown at checkout.</s-text>
           </s-paragraph>
         )}
 
@@ -167,7 +175,7 @@ export default function Billing() {
                       <s-button variant="secondary" disabled>Current plan</s-button>
                     ) : (
                       <s-button variant="primary" href={`/app/billing?upgrade=${p.name}`}>
-                        {current ? "Switch to this plan" : "Choose plan"}
+                        {current ? "Switch to this plan" : inTrial ? "Approve plan" : "Choose plan"}
                       </s-button>
                     )}
                   </div>
@@ -177,7 +185,7 @@ export default function Billing() {
           })}
         </div>
         <s-paragraph>
-          <s-text tone="neutral">Plans include a {TRIAL_DAYS}-day free trial (capped at {TRIAL_REPLY_CAP.toLocaleString()} AI replies). One AI reply = one answer from the assistant. Charges are billed through Shopify. Changing plans takes effect immediately after approval.</s-text>
+          <s-text tone="neutral">New installs get a {TRIAL_DAYS}-day capped trial ({TRIAL_REPLY_CAP.toLocaleString()} AI replies) before plan approval is required. One AI reply = one answer from the assistant. Charges are billed through Shopify after approval.</s-text>
         </s-paragraph>
       </s-section>
     </s-page>

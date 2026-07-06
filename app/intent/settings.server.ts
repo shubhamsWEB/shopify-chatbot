@@ -16,6 +16,7 @@ export interface BotConfig {
   minTimeOnSiteSec: number;    // grace period before the first nudge
   soundEnabled: boolean;       // soft chime when a popup opens
   badgeEnabled: boolean;       // red attention badge on the chat bubble
+  customerDataEnabled: boolean; // allow signed-in shoppers to query their own orders
 }
 
 export const DEFAULT_CONFIG: BotConfig = {
@@ -29,6 +30,7 @@ export const DEFAULT_CONFIG: BotConfig = {
   minTimeOnSiteSec: 8,
   soundEnabled: true,
   badgeEnabled: true,
+  customerDataEnabled: true,
 };
 
 const clampNum = (v: unknown, d: number, min: number, max: number) => {
@@ -50,6 +52,7 @@ export function normalizeConfig(raw: Partial<BotConfig> | null | undefined): Bot
     minTimeOnSiteSec: clampNum(r.minTimeOnSiteSec, DEFAULT_CONFIG.minTimeOnSiteSec, 3, 120),
     soundEnabled: clampBool(r.soundEnabled, DEFAULT_CONFIG.soundEnabled),
     badgeEnabled: clampBool(r.badgeEnabled, DEFAULT_CONFIG.badgeEnabled),
+    customerDataEnabled: clampBool(r.customerDataEnabled, DEFAULT_CONFIG.customerDataEnabled),
   };
 }
 
@@ -64,11 +67,22 @@ export interface BackofficeMeta {
   trialEndsAt?: string | null;
 }
 
+export interface ShopInfo {
+  name?: string;
+  ownerName?: string;
+  contactEmail?: string;
+  domain?: string;
+  planName?: string;
+  currencyCode?: string;
+  shopCreatedAt?: string;
+}
+
 export interface ShopSettings {
   brandDescription: string;
   welcomeMessage: string;
   config: BotConfig;
   backoffice: BackofficeMeta;
+  shopInfo: ShopInfo;
 }
 
 export const DEFAULT_WELCOME =
@@ -78,7 +92,7 @@ export const DEFAULT_WELCOME =
   "- **Recommend picks** personalized to what you're browsing\n" +
   "- **Answer questions** on details, sizing, and stock\n\n" +
   "What are you looking for today?";
-const EMPTY: ShopSettings = { brandDescription: "", welcomeMessage: "", config: DEFAULT_CONFIG, backoffice: {} };
+const EMPTY: ShopSettings = { brandDescription: "", welcomeMessage: "", config: DEFAULT_CONFIG, backoffice: {}, shopInfo: {} };
 
 let tableReady: Promise<void> | null = null;
 function ensureTable(): Promise<void> {
@@ -135,6 +149,7 @@ export async function getSettings(shop: string): Promise<ShopSettings> {
           welcomeMessage: row.welcomeMessage,
           config: normalizeConfig(row.config as Partial<BotConfig>),
           backoffice: ((row as { backoffice?: unknown }).backoffice as BackofficeMeta) ?? {},
+          shopInfo: ((row as { shopInfo?: unknown }).shopInfo as ShopInfo) ?? {},
         }
       : EMPTY;
     cache.set(shop, { v, at: Date.now() });
@@ -146,6 +161,17 @@ export async function getSettings(shop: string): Promise<ShopSettings> {
   }
 }
 
+export async function getShopInfo(shop: string): Promise<ShopInfo> {
+  try {
+    await ensureTable();
+    const row = await prisma.shopSettings.findUnique({ where: { shop }, select: { shopInfo: true } });
+    return ((row as { shopInfo?: unknown } | null)?.shopInfo as ShopInfo) ?? {};
+  } catch (err) {
+    console.error("[settings] shopInfo read failed:", (err as Error).message);
+    return {};
+  }
+}
+
 export async function saveSettings(shop: string, s: ShopSettings): Promise<void> {
   await ensureTable();
   const brandDescription = s.brandDescription.trim().slice(0, 2000);
@@ -153,10 +179,10 @@ export async function saveSettings(shop: string, s: ShopSettings): Promise<void>
   const config = normalizeConfig(s.config);
   await prisma.shopSettings.upsert({
     where: { shop },
-    create: { shop, brandDescription, welcomeMessage, config: config as unknown as object },
+    create: { shop, brandDescription, welcomeMessage, config: config as unknown as object, backoffice: s.backoffice as unknown as object, shopInfo: s.shopInfo as unknown as object },
     update: { brandDescription, welcomeMessage, config: config as unknown as object },
   });
-  cache.set(shop, { v: { brandDescription, welcomeMessage, config, backoffice: s.backoffice ?? {} }, at: Date.now() });
+  cache.set(shop, { v: { brandDescription, welcomeMessage, config, backoffice: s.backoffice ?? {}, shopInfo: s.shopInfo ?? {} }, at: Date.now() });
 }
 
 /** Developer-only: update the backoffice controls without touching merchant fields. */
@@ -168,4 +194,15 @@ export async function saveBackoffice(shop: string, meta: BackofficeMeta): Promis
     update: { backoffice: meta as unknown as object },
   });
   cache.delete(shop); // next read picks up fresh meta
+}
+
+/** Admin-load sync: store read-only shop metadata without touching merchant settings. */
+export async function saveShopInfo(shop: string, info: ShopInfo): Promise<void> {
+  await ensureTable();
+  await prisma.shopSettings.upsert({
+    where: { shop },
+    create: { shop, shopInfo: info as unknown as object },
+    update: { shopInfo: info as unknown as object },
+  });
+  cache.delete(shop);
 }

@@ -3,37 +3,24 @@ import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
-import { authenticate, PLAN } from "../shopify.server";
-import { getBackofficeMeta } from "../intent/settings.server";
+import { authenticate } from "../shopify.server";
+import { ensureBillingState } from "../intent/billing.server";
+import { syncShopInfo } from "../intent/shopinfo.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { billing, session } = await authenticate.admin(request);
+  const { admin, billing, session } = await authenticate.admin(request);
 
-  // Gate the app on an active subscription (14-day free trial). On no-subscription
-  // (and a Partner-owned app) this redirects to Shopify's approval page.
-  // isTest must be true for dev/test stores (they can't take real charges).
-  // Default true; set SHOPIFY_BILLING_TEST=false only for the real launch.
+  // First install gets a capped internal trial. Shopify billing approval is
+  // requested only when the merchant chooses a paid plan from Plan & usage.
   // eslint-disable-next-line no-undef
   const isTest = process.env.SHOPIFY_BILLING_TEST !== "false";
-  try {
-    await billing.require({
-      plans: [PLAN],
-      isTest,
-      onFailure: async () => billing.request({ plan: PLAN, isTest }),
-    });
-  } catch (err) {
-    // The redirect to the approval page is thrown as a Response — must propagate.
-    if (err instanceof Response) throw err;
-    // Otherwise billing can't operate (e.g. app still owned by a Shop, not a
-    // Partner org — appSubscriptionCreate is rejected). Don't crash the admin;
-    // self-heals once the app is migrated to a Partner organization.
-    console.error("[billing] gate skipped:", (err as Error).message,
-      JSON.stringify((err as { errorData?: unknown }).errorData ?? null));
-  }
+  const [{ meta: backoffice }] = await Promise.all([
+    ensureBillingState(session.shop, billing, admin, isTest),
+    syncShopInfo(session.shop, admin),
+  ]);
 
-  // eslint-disable-next-line no-undef
-  const backoffice = await getBackofficeMeta(session.shop);
   return {
+    // eslint-disable-next-line no-undef
     apiKey: process.env.SHOPIFY_API_KEY || "",
     botEnabled: backoffice.botEnabled !== false,
   };
@@ -41,15 +28,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 export default function App() {
   const { apiKey, botEnabled } = useLoaderData<typeof loader>();
+  const homeRel = { rel: "home" };
 
   return (
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app">Overview</s-link>
-        <s-link href="/app/intent">Intent profiles</s-link>
-        <s-link href="/app/assistant">Analytics assistant</s-link>
+        <s-link href="/app" {...homeRel}>Overview</s-link>
+        <s-link href="/app/intent">Intent</s-link>
+        <s-link href="/app/assistant">Assistant</s-link>
+        <s-link href="/app/billing">Plan & usage</s-link>
         <s-link href="/app/privacy">Compliance</s-link>
-        <s-link href="/app/settings">Bot settings</s-link>
+        <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>
       {!botEnabled ? (
         <s-banner tone="critical" heading="Service stopped">
