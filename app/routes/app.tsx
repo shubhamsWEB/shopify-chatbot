@@ -8,14 +8,12 @@ import { ensureBillingState } from "../intent/billing.server";
 import { syncShopInfo } from "../intent/shopinfo.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, billing, session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   // First install gets a capped internal trial. Shopify billing approval is
   // requested only when the merchant chooses a paid plan from Plan & usage.
-  // eslint-disable-next-line no-undef
-  const isTest = process.env.SHOPIFY_BILLING_TEST !== "false";
   const [{ meta: backoffice }] = await Promise.all([
-    ensureBillingState(session.shop, billing, admin, isTest),
+    ensureBillingState(session.shop, admin),
     syncShopInfo(session.shop, admin),
   ]);
 

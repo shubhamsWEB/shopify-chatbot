@@ -89,7 +89,12 @@
   }
   function resolveTheme() {
     const manual = usablePrimary(CONFIG.primaryColor) || DEFAULT_PRIMARY;
-    if (CONFIG.autoMatch === false) return { primary: manual, primaryHover: adjustColor(manual, -0.18), onPrimary: luminance(colorToRgb(manual)) > 0.55 ? "#111827" : "#fff" };
+    // A manual color the merchant actually CHANGED from the default wins even
+    // with auto-match on — picking a color in the editor is an explicit intent
+    // signal; requiring them to also untick auto-match read as "not working"
+    // (live bug report, 2026-07-08). Auto-match keeps handling the font either way.
+    const manualChosen = manual.toLowerCase() !== DEFAULT_PRIMARY;
+    if (CONFIG.autoMatch === false || manualChosen) return { primary: manual, primaryHover: adjustColor(manual, -0.18), onPrimary: luminance(colorToRgb(manual)) > 0.55 ? "#111827" : "#fff" };
 
     const root = getComputedStyle(document.documentElement);
     const body = getComputedStyle(document.body);
@@ -127,7 +132,6 @@
     return { primary: manual, primaryHover: adjustColor(manual, -0.18), onPrimary: luminance(colorToRgb(manual)) > 0.55 ? "#111827" : "#fff" };
   }
   const THEME = resolveTheme();
-  const PRIMARY_GRADIENT = `linear-gradient(135deg, ${THEME.primary} 0%, ${THEME.primaryHover} 100%)`;
 
   /* Consent: honor the Shopify Customer Privacy API. When analytics consent is
      not granted we keep the chat working but DON'T persist a tracking cookie,
@@ -259,6 +263,39 @@
     } catch (e) { /* never throw into storefront */ }
   }
 
+  /* Launcher icon options (theme-editor `launcher_icon` setting). A widget
+     rewrite dropped this wiring once — the embed's settings rendered into
+     window.__SALESHQ_CONFIG__ but nothing read them (live bug report,
+     2026-07-08). Keep every CONFIG.* read below when refactoring. */
+  const LAUNCHER_ICONS = {
+    chat: `
+    <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+    </svg>
+  `,
+    sparkle: `
+    <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z"/>
+    </svg>
+  `,
+    bag: `
+    <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/>
+    </svg>
+  `,
+    help: `
+    <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  `,
+  };
+  const chatIconSvg = LAUNCHER_ICONS[CONFIG.launcherIcon] || LAUNCHER_ICONS.chat;
+  // Merchant-editable header copy + screen side (theme editor).
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const HEADER_TITLE = esc(CONFIG.headerTitle || "SalesHQ Assistant");
+  const HEADER_SUBTITLE = esc(CONFIG.headerSubtitle || "Always here to help");
+  const SIDE = CONFIG.position === "left" ? "left" : "right";
+
   /* Inject CSS animations and styles */
   const styleSheet = document.createElement("style");
   styleSheet.textContent = `
@@ -317,7 +354,7 @@
       animation: saleshq-fade-in 0.3s ease-out forwards;
     }
     .saleshq-close-btn:hover {
-      background: rgba(255,255,255,0.1) !important;
+      background: rgba(255,255,255,0.26) !important;
     }
     #saleshq-messages::-webkit-scrollbar {
       width: 6px;
@@ -331,6 +368,42 @@
     }
     #saleshq-messages::-webkit-scrollbar-thumb:hover {
       background: #ccc;
+    }
+    /* Responsive panel (Claude Design project 8cb384f7: desktop/tablet floating
+       panel, mobile full-screen sheet). Positioning lives HERE, not inline
+       cssText, so the media queries can own it per breakpoint. Desktop width
+       kept at the current 480px per merchant preference (design mock shows 400). */
+    .saleshq-chat {
+      position: fixed;
+      background: #fff;
+      display: none;
+      z-index: 999999;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+      flex-direction: column;
+    }
+    @media (min-width: 600px) {
+      .saleshq-chat {
+        top: 24px;
+        bottom: 96px;
+        ${SIDE}: 24px;
+        width: min(480px, calc(100vw - 48px));
+        border-radius: 18px;
+        box-shadow: 0 24px 64px -16px rgba(15,23,42,0.28), 0 0 0 1px rgba(15,23,42,0.06);
+      }
+    }
+    @media (max-width: 599px) {
+      .saleshq-chat {
+        inset: 0;
+        width: 100%;
+        height: 100dvh;
+        border-radius: 0;
+        box-shadow: none;
+      }
+      .saleshq-head { padding-top: calc(env(safe-area-inset-top, 0px) + 16px) !important; }
+      .saleshq-foot { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px) !important; }
+      /* full-screen sheet covers the launcher — hide it while open */
+      .saleshq-btn.saleshq-open { display: none !important; }
     }
     /* Carousel Styles */
     .saleshq-carousel {
@@ -533,11 +606,6 @@
   document.head.appendChild(styleSheet);
 
   /* Chat icon SVG */
-  const chatIconSvg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
-    </svg>
-  `;
 
   /* Close icon SVG */
   const closeIconSvg = `
@@ -603,13 +671,16 @@
   /* Floating Button */
   const button = document.createElement("div");
   button.className = "saleshq-btn";
+  // rgba() of the brand color for the design's brand-tinted launcher shadow.
+  const brandRgb = colorToRgb(THEME.primary) || { r: 26, g: 26, b: 26 };
+  const brandTint = (a) => `rgba(${brandRgb.r},${brandRgb.g},${brandRgb.b},${a})`;
   button.style.cssText = `
     position: fixed;
     bottom: 24px;
-    right: 24px;
-    width: 60px;
-    height: 60px;
-    background: ${PRIMARY_GRADIENT};
+    ${SIDE}: 24px;
+    width: 56px;
+    height: 56px;
+    background: ${THEME.primary};
     color: ${THEME.onPrimary};
     border-radius: 50%;
     display: flex;
@@ -618,7 +689,7 @@
     cursor: pointer;
     z-index: 999999;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+    box-shadow: 0 8px 24px ${brandTint(0.32)}, 0 2px 6px rgba(15,23,42,0.1);
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   `;
   const badgeEl = document.createElement("span");
@@ -632,71 +703,68 @@
 
   /* Chat Box — full height (pinned top+bottom), wide, responsive on mobile */
   const chat = document.createElement("div");
-  chat.style.cssText = `
-    position: fixed;
-    top: 24px;
-    bottom: 100px;
-    right: 24px;
-    width: min(480px, calc(100vw - 48px));
-    background: #fff;
-    border-radius: 20px;
-    box-shadow: 0 12px 50px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
-    display: none;
-    z-index: 999999;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    overflow: hidden;
-    flex-direction: column;
-  `;
+  chat.className = "saleshq-chat"; // positioning/size in the stylesheet (responsive)
 
   chat.innerHTML = `
-    <div style="
-      padding: 18px 20px;
-      background: ${PRIMARY_GRADIENT};
+    <div class="saleshq-head" style="
+      padding: 16px 18px;
+      background: ${THEME.primary};
       color: ${THEME.onPrimary};
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      gap: 11px;
     ">
-      <div style="display: flex; align-items: center; gap: 12px;">
-        <div style="
-          width: 10px;
-          height: 10px;
-          background: #4ade80;
-          border-radius: 50%;
-          box-shadow: 0 0 8px rgba(74, 222, 128, 0.6);
-        "></div>
-        <div>
-          <div style="font-weight: 600; font-size: 15px; letter-spacing: -0.3px;">SalesHQ Assistant</div>
-          <div style="font-size: 12px; opacity: 0.8; margin-top: 2px;">Always here to help</div>
-        </div>
-      </div>
-      <button id="saleshq-close" class="saleshq-close-btn" style="
-        background: transparent;
-        border: none;
-        color: ${THEME.onPrimary};
-        cursor: pointer;
-        padding: 6px;
+      <span style="
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.18);
         display: flex;
         align-items: center;
         justify-content: center;
-        border-radius: 8px;
+        flex: 0 0 auto;
+      ">${chatIconSvg.replace('width="26" height="26"', 'width="18" height="18"')}</span>
+      <div style="flex: 1; min-width: 0;">
+        <div style="font-weight: 700; font-size: 15px; letter-spacing: -0.2px;">${HEADER_TITLE}</div>
+        <div style="font-size: 12px; opacity: 0.85; margin-top: 1px;">${HEADER_SUBTITLE}</div>
+      </div>
+      <span style="
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #4ade80;
+        box-shadow: 0 0 0 3px rgba(74,222,128,0.25);
+        flex: 0 0 auto;
+      "></span>
+      <button id="saleshq-close" class="saleshq-close-btn" style="
+        width: 32px;
+        height: 32px;
+        background: rgba(255,255,255,0.14);
+        border: none;
+        color: ${THEME.onPrimary};
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
         transition: background 0.2s;
+        flex: 0 0 auto;
       ">
         ${closeIconSvg}
       </button>
     </div>
     <div id="saleshq-messages" style="
       flex: 1;
-      padding: 14px;
+      padding: 16px;
       overflow-y: auto;
       overflow-x: hidden;
-      background: #f8f9fa;
+      background: #f6f7f9;
       scroll-behavior: smooth;
     "></div>
     <div id="saleshq-tips-footer" style="
       text-align: center;
       padding: 2px 0 6px;
-      background: #f8f9fa;
+      background: #f6f7f9;
     ">
       <button id="saleshq-tips-off" style="
         background: none;
@@ -710,10 +778,10 @@
     <form id="saleshq-form" style="
       display: flex;
       align-items: center;
-      padding: 14px 16px;
+      padding: 12px 14px;
       gap: 10px;
       background: #fff;
-      border-top: 1px solid #eee;
+      border-top: 1px solid #eef0f2;
     ">
       <input
         id="saleshq-input"
@@ -722,17 +790,18 @@
         autocomplete="off"
         style="
           flex: 1;
-          border: 1px solid #e5e5e5;
-          padding: 12px 16px;
-          border-radius: 24px;
+          height: 44px;
+          border: 1px solid #e5e7eb;
+          padding: 0 16px;
+          border-radius: 22px;
           font-size: 14px;
           transition: all 0.2s;
-          background: #f8f9fa;
+          background: #f7f8fa;
         "
       />
       <button type="submit" class="saleshq-send-btn" style="
-        width: 42px;
-        height: 42px;
+        width: 44px;
+        height: 44px;
         border: none;
         background: ${THEME.primary};
         color: ${THEME.onPrimary};
@@ -747,6 +816,13 @@
         ${sendIconSvg}
       </button>
     </form>
+    <div class="saleshq-foot" style="
+      text-align: center;
+      font-size: 10.5px;
+      color: #b6bcc6;
+      padding: 0 0 8px;
+      background: #fff;
+    ">Powered by <b style="color:#8b91a0;font-weight:600;">SalesHQ</b></div>
   `;
 
   function toggleChat() {
@@ -756,6 +832,7 @@
       chat.style.display = "flex";
       chat.style.animation = "saleshq-fade-in 0.3s ease-out forwards";
       setButtonIcon(closeIconSvg);
+      button.classList.add("saleshq-open"); // mobile sheet hides the launcher
       setBadge(0); // opening clears the unread badge
     } else {
       // Closing the widget just closes it — it does NOT silence the session.
@@ -764,6 +841,7 @@
       proactiveOpen = false;
       chat.style.animation = "saleshq-fade-out 0.2s ease-out forwards";
       setButtonIcon(chatIconSvg);
+      button.classList.remove("saleshq-open"); // mobile: bring the launcher back
       setTimeout(() => {
         chat.style.display = "none";
       }, 200);
@@ -884,6 +962,7 @@
   if (state.open) {
     chat.style.display = "flex";
     setButtonIcon(closeIconSvg);
+    button.classList.add("saleshq-open");
   }
 
   Promise.all([loadConfig(), loadServerHistory()]).finally(() => {
@@ -940,12 +1019,19 @@
     if (!API_BASE || proactiveDisabled || !CFG.proactiveEnabled || !CFG.botEnabled) return;
     try { await seedDone; } catch (e) { /* seeds are best-effort */ }
     try { await flushEvents(); } catch (e) { /* engine must see this page's events */ }
-    // A shopper who is chatting drives the conversation — but once they've gone
-    // quiet for CHAT_IDLE_MS, intent nudges resume (into the open window if
-    // it's still open, or as a fresh popup).
+    // A shopper who is ACTIVELY chatting drives the conversation — but once
+    // they've gone quiet for CHAT_IDLE_MS, intent nudges resume (into the open
+    // window if it's still open, or as a fresh popup). A window that's merely
+    // open because the passive auto-welcome opened it (shopper never typed)
+    // does NOT block: the welcome's own auto-add used to bump lastMessageAt,
+    // making chatIsIdle() stay false for a full 50s from an event the BOT
+    // caused, not the user — silencing every intent nudge for a shopper who
+    // never engaged. Found via real-browser testing (2026-07-07): the welcome
+    // opened at 10s and no dwell/compare nudge could fire until ~60s, past
+    // when a short-attention-span visitor has already left.
     const idle = chatIsIdle();
     const hasChatted = state.history.some((m) => m.role === "user");
-    if ((state.open || hasChatted) && !idle) return;
+    if (hasChatted && !idle) return;
     if (!analyticsAllowed()) return; // proactive targeting is behavioral → needs consent
     let productId = null;
     try { productId = await currentProductGid(); } catch (e) { /* ignore */ }
@@ -1022,12 +1108,33 @@
   if (detectSurface() === "product") {
     const DWELL_MS = 10_000;
     setTimeout(async () => {
-      if ((state.open || state.history.some((m) => m.role === "user")) && !chatIsIdle()) return;
+      if (state.history.some((m) => m.role === "user") && !chatIsIdle()) return; // only an ACTIVE conversation blocks — see runProactive
       let pid = null;
       try { pid = await currentProductGid(); } catch (e) { /* ignore */ }
       emitFriction("page_view", { dwellMs: DWELL_MS, productId: pid || undefined });
       setTimeout(() => runProactive(), 1500); // let the dwell event ingest first
     }, DWELL_MS);
+
+    // Comparison fast-path: the server's product_compare trigger needs a PDP
+    // loop (A → B → back to A). Waiting for the next poll (first at 9s, then
+    // every 15s) made the comparison nudge feel late — the shopper is at PEAK
+    // comparison intent the instant they land back on a product they've seen.
+    // Track visited PDPs client-side; the moment this page completes a loop,
+    // ask the engine right away (~1.5s for the view event to ingest). Server
+    // gates still decide — this only moves the ASK earlier, never forces a show.
+    (async () => {
+      let pid = null;
+      try { pid = await currentProductGid(); } catch (e) { /* ignore */ }
+      if (!pid) return;
+      let seen = [];
+      try { seen = JSON.parse(sessionStorage.getItem("saleshq_pdp_trail") || "[]"); } catch (e) { /* ignore */ }
+      const prevIdx = seen.lastIndexOf(pid);
+      // Loop = this product was visited before, with a DIFFERENT product in between.
+      const loop = prevIdx !== -1 && seen.slice(prevIdx + 1).some((p) => p !== pid);
+      if (seen[seen.length - 1] !== pid) seen.push(pid);
+      try { sessionStorage.setItem("saleshq_pdp_trail", JSON.stringify(seen.slice(-20))); } catch (e) { /* ignore */ }
+      if (loop) setTimeout(() => runProactive(), 1500);
+    })();
   }
 
 
@@ -1095,10 +1202,15 @@
   })();
 
   function startProactivePolling() {
-    setTimeout(() => runProactive(), 4000);
+    // First real check lands just past the default min-session-age gate (8s
+    // server-side) — the old 4s-then-30s cadence wasted its entire first cycle
+    // on a call guaranteed to fail eligibility, then left a 30s gap before the
+    // next try. Short visits (per live feedback: shoppers who don't engage
+    // quickly leave) need a tighter early cadence.
+    setTimeout(() => runProactive(), 9_000);
     proactiveRecheckTimer = setInterval(() => {
       proactiveChecks++;
-      if (proactiveChecks > 20 || proactiveDisabled) {
+      if (proactiveChecks > 30 || proactiveDisabled) {
         clearInterval(proactiveRecheckTimer);
         return;
       }
@@ -1111,7 +1223,7 @@
         return;
       }
       runProactive();
-    }, 30_000);
+    }, 15_000);
   }
 
   /* Welcome attention flow: once per browser session — badge + chime teaser,
@@ -1153,8 +1265,8 @@
     return `<div style="
       display:inline-block;
       padding:10px 14px;
-      border-radius:${isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px"};
-      background:${isUser ? PRIMARY_GRADIENT : "#fff"};
+      border-radius:${isUser ? "16px 16px 5px 16px" : "16px 16px 16px 5px"};
+      background:${isUser ? THEME.primary : "#fff"};
       color:${isUser ? THEME.onPrimary : "#1f2937"};
       max-width:${isUser ? "82%" : "96%"};
       font-size:14px;line-height:1.5;letter-spacing:-0.1px;
@@ -1192,10 +1304,21 @@
         i += 2;
         const rows = [];
         while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) { rows.push(cells(lines[i])); i++; }
-        let t = '<div style="overflow-x:auto;margin:8px 0;border:1px solid #eef0f2;border-radius:10px;"><table style="border-collapse:collapse;font-size:12px;width:100%;">';
-        t += "<thead><tr>" + header.map((h) => `<th style="padding:7px 10px;text-align:left;background:#f7f8fa;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;white-space:nowrap;">${inline(h)}</th>`).join("") + "</tr></thead><tbody>";
+        // Fixed layout with explicit column widths — WITHOUT this, a narrow
+        // widget auto-sizes columns and crushes the leftmost feature column into
+        // letter-by-letter vertical wrap ("S/u/p/p/o/r/t"). The first (key)
+        // column is wider + sticky so feature names stay readable while data
+        // columns scroll horizontally. (Regression re-fix, 2026-07-08.)
+        const FIRST_W = 120, DATA_W = 148;
+        const dataCols = Math.max(1, header.length - 1);
+        const tableW = FIRST_W + DATA_W * dataCols;
+        const firstCell = "position:sticky;left:0;z-index:1;";
+        let t = '<div style="overflow-x:auto;margin:8px 0;border:1px solid #eef0f2;border-radius:10px;"><table style="border-collapse:collapse;font-size:12px;table-layout:fixed;width:' + tableW + 'px;">';
+        t += "<colgroup>" + header.map((_, ci) => `<col style="width:${ci === 0 ? FIRST_W : DATA_W}px;">`).join("") + "</colgroup>";
+        t += "<thead><tr>" + header.map((h, ci) => `<th style="padding:7px 10px;text-align:left;background:#f7f8fa;font-weight:600;color:#374151;border-bottom:1px solid #e5e7eb;word-break:normal;overflow-wrap:break-word;${ci === 0 ? firstCell : ""}">${inline(h)}</th>`).join("") + "</tr></thead><tbody>";
         rows.forEach((r, ri) => {
-          t += `<tr style="background:${ri % 2 ? "#fbfbfc" : "#fff"};">` + r.map((c, ci) => `<td style="padding:7px 10px;border-bottom:1px solid #f1f2f4;${ci === 0 ? "font-weight:600;color:#374151;" : "color:#4b5563;"}">${inline(c)}</td>`).join("") + "</tr>";
+          const bg = ri % 2 ? "#fbfbfc" : "#fff";
+          t += `<tr style="background:${bg};">` + r.map((c, ci) => `<td style="padding:7px 10px;border-bottom:1px solid #f1f2f4;word-break:normal;overflow-wrap:break-word;vertical-align:top;${ci === 0 ? `font-weight:600;color:#374151;background:${bg};${firstCell}` : "color:#4b5563;"}">${inline(c)}</td>`).join("") + "</tr>";
         });
         out.push(t + "</tbody></table></div>");
         continue;
@@ -1235,6 +1358,7 @@
     state.history.push({ role, content: text, ...(extra || {}) });
     state.lastMessageAt = Date.now();
     saveState();
+    return msg;
   }
 
   function renderProductCarousel(products) {
@@ -1412,6 +1536,47 @@
     }
   }
 
+  // Real /cart.js contents sent with every chat turn, so the bot can answer
+  // "what's in my cart" from ground truth instead of guessing (live bug report:
+  // the bot had no way to see the cart at all).
+  async function getCartSnapshot() {
+    try {
+      const res = await fetch(`${getShopifyRoot()}cart.js`);
+      const cart = await res.json();
+      return {
+        items: (cart.items || []).slice(0, 20).map((i) => ({
+          title: i.product_title + (i.variant_title ? ` (${i.variant_title})` : ""),
+          quantity: i.quantity,
+          price: i.price / 100,
+        })),
+        total: cart.total_price / 100,
+        currency: cart.currency,
+      };
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  // Executes the bot's conversational add_to_cart tool call (server already
+  // resolved productId/variantId/quantity — no handle lookup needed here).
+  async function performCartAdd(cartAdd) {
+    const root = getShopifyRoot();
+    try {
+      const addRes = await fetch(`${root}cart/add.js`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ id: cartAdd.variantId, quantity: cartAdd.quantity || 1 }] })
+      });
+      if (!addRes.ok) throw new Error("cart/add.js failed");
+      const cartRes = await fetch(`${root}cart.js`);
+      const cartData = await cartRes.json();
+      updateCartUI(cartData);
+      emitBot("bot_add_to_cart", { productId: cartAdd.productId });
+    } catch (err) {
+      addMessage("assistant", `Sorry, that didn't actually make it into your cart. Try the "Add to Cart" button on the card instead.`);
+    }
+  }
+
   function renderFollowups(followups) {
     if (!followups || followups.length === 0) return;
 
@@ -1511,47 +1676,127 @@
 
     const typingEl = showTypingIndicator();
     try { await flushEvents(); } catch (e) { /* chat context should include queued events */ }
+    const cart = await getCartSnapshot();
+
+    const body = JSON.stringify({
+      shopId: SHOP_ID,
+      sessionId: SESSION_ID,
+      message: text,
+      cart,
+      // strip client-only fields (products/followups) — server wants role+content
+      history: state.history.slice(-10).map((m) => ({ role: m.role, content: m.content }))
+    });
 
     try {
       if (!API_BASE) throw new Error("SalesHQ: apiBase not configured in theme settings");
+      const streamed = await streamChat(body, typingEl);
+      if (streamed) return; // stream handled the whole response (text + extras)
+
+      // Fallback: non-streaming endpoint (older server, or the stream failed).
       const res = await fetch(`${API_BASE}/chat`, {
         method: "POST",
-        // text/plain keeps it a "simple" CORS request (no preflight); server JSON-parses anyway
         headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({
-          shopId: SHOP_ID,
-          sessionId: SESSION_ID,
-          message: text,
-          // strip client-only fields (products/followups) — server wants role+content
-          history: state.history.slice(-10).map((m) => ({ role: m.role, content: m.content }))
-        })
+        body,
       });
-
       const data = await res.json();
       typingEl.remove();
-
       if (!res.ok || data.serviceStopped) {
         addMessage("assistant", data.message || data.response || "The assistant is temporarily unavailable. Please check back soon.");
         return;
       }
-
       addMessage("assistant", data.response, { products: data.products || [], followups: data.followups || [] });
-
-      if (data.products && data.products.length) {
-        renderProductCarousel(data.products);
-      }
-
-      if (data.followups && data.followups.length) {
-        renderFollowups(data.followups);
-      }
+      if (data.cartAdd) performCartAdd(data.cartAdd);
+      if (data.products && data.products.length) renderProductCarousel(data.products);
+      if (data.followups && data.followups.length) renderFollowups(data.followups);
     } catch (err) {
       typingEl.remove();
-      addMessage(
-        "assistant",
-        "Sorry, I'm having trouble right now. Please try again."
-      );
+      addMessage("assistant", "Sorry, I'm having trouble right now. Please try again.");
     }
   };
+
+  /* Stream the reply token-by-token over SSE from /chat-stream so the shopper
+     sees text appear as the LLM emits it (was reverted to a blocking /chat
+     call — restored 2026-07-08). Events: {reset} drop interim text before a
+     tool turn, {delta,text} append a token, {done,...ChatResult} final extras,
+     {error}. Returns true if it fully handled the response; false → caller
+     falls back to POST /chat. text/plain body keeps it a simple CORS request. */
+  async function streamChat(body, typingEl) {
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/chat-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body,
+      });
+    } catch (e) {
+      return false; // network/route missing → fall back
+    }
+    if (!res.ok || !res.body || !/text\/event-stream/i.test(res.headers.get("content-type") || "")) {
+      return false;
+    }
+
+    typingEl.remove();
+    // Live assistant bubble we append tokens into.
+    const msgEl = addMessage("assistant", "");
+    const bubble = msgEl.querySelector("div"); // the bubbleHtml wrapper
+    let acc = "";
+    let done = null;
+    const paint = () => { if (bubble) { bubble.innerHTML = parseMarkdown(acc); messagesEl.scrollTop = messagesEl.scrollHeight; } };
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    try {
+      for (;;) {
+        const { value, done: rdone } = await reader.read();
+        if (rdone) break;
+        buf += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line; each carries `data: {json}`.
+        const frames = buf.split("\n\n");
+        buf = frames.pop() || "";
+        for (const frame of frames) {
+          const line = frame.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+          if (evt.type === "reset") { acc = ""; paint(); }
+          else if (evt.type === "delta") { acc += evt.text || ""; paint(); }
+          else if (evt.type === "done") { done = evt; }
+          else if (evt.type === "error") { acc = evt.message || "Sorry, I'm having trouble right now. Please try again."; paint(); }
+        }
+      }
+    } catch (e) {
+      // Mid-stream failure after we already committed the bubble: if nothing
+      // arrived, drop the empty bubble + its history entry and signal fallback;
+      // otherwise keep what we have.
+      if (!acc && !done) { msgEl.remove(); state.history.pop(); saveState(); return false; }
+    }
+
+    // Finalize with the authoritative text + extras from the done frame.
+    if (done) {
+      if (done.serviceStopped) { acc = done.message || done.response || acc; }
+      else if (done.response) { acc = done.response; }
+      paint();
+      // Persist so refresh/reopen restores cards + chips (addMessage only stored the shell).
+      const last = state.history[state.history.length - 1];
+      if (last && last.role === "assistant") {
+        last.content = acc;
+        last.products = done.products || [];
+        last.followups = done.followups || [];
+        saveState();
+      }
+      if (!done.serviceStopped) {
+        if (done.cartAdd) performCartAdd(done.cartAdd);
+        if (done.products && done.products.length) renderProductCarousel(done.products);
+        if (done.followups && done.followups.length) renderFollowups(done.followups);
+      }
+    } else if (acc) {
+      // Stream ended without a done frame but we have text — keep it.
+      const last = state.history[state.history.length - 1];
+      if (last && last.role === "assistant") { last.content = acc; saveState(); }
+    }
+    return true;
+  }
 
   function updateCartUI(cartData) {
     const itemCount = cartData.item_count;
@@ -1616,34 +1861,63 @@
       }
     });
 
-    // 4. Try to refresh header section (Dawn and OS 2.0 themes)
+    // 4. Try to refresh header section (Dawn and OS 2.0 themes). Some themes'
+    // own cart-icon component re-renders itself from its OWN (still-stale at
+    // that instant) internal state right after our swap, silently reverting
+    // it — observed live: count stayed at the old value after a real add.
+    // A second pass a beat later reliably wins that race.
     refreshCartSection();
+    setTimeout(refreshCartSection, 900);
   }
 
   async function refreshCartSection() {
     const root = getShopifyRoot();
-    
-    // Common section IDs for cart in different themes
-    const sectionIds = [
-      "cart-icon-bubble",
-      "cart-drawer",
-      "header",
-      "cart-notification"
-    ];
+
+    // Section ids are theme/store-generated (e.g. Shopify's newest "Horizon"
+    // theme names them "sections--<numeric>__header_section", not "header") —
+    // a hardcoded guess list silently matched nothing on this store, so the
+    // cart icon/drawer never updated without a reload (live bug report,
+    // 2026-07-08). Discover the REAL ids actually rendered on this page instead.
+    const sectionIds = Array.from(document.querySelectorAll('[id^="shopify-section-"]'))
+      .map((el) => el.id.replace("shopify-section-", ""))
+      .filter((id) => /cart|header/i.test(id));
+    if (!sectionIds.length) return;
 
     try {
       // Use Section Rendering API to refresh cart sections
       const sectionsParam = sectionIds.join(",");
       const response = await fetch(`${root}?sections=${sectionsParam}`);
-      
+
       if (response.ok) {
         const sections = await response.json();
-        
+        const parser = new DOMParser();
+        // Only swap known cart-icon/bubble sub-elements, never the whole
+        // section: this theme's nav/search/logo are built by client JS that
+        // doesn't survive a full innerHTML replace (live bug: badge count
+        // updated correctly but the entire header nav vanished). Scoped to
+        // what the shopper actually looks at — the cart icon/count.
+        const CART_SELECTORS = [
+          "cart-icon", ".cart-icon", ".cart-bubble", ".cart-count-bubble",
+          "[data-cart-icon]", "#cart-icon-bubble",
+          // Drawer line items + totals — the badge count updated but the
+          // drawer itself kept showing the pre-add items/total until reload
+          // (live bug report, 2026-07-08): these live in separate elements
+          // from the icon and need their own swap.
+          "cart-items-component", ".cart-totals",
+        ];
+
         Object.entries(sections).forEach(([sectionId, html]) => {
-          const sectionEl = document.getElementById(`shopify-section-${sectionId}`);
-          if (sectionEl && html) {
-            sectionEl.innerHTML = html;
-          }
+          const liveEl = document.getElementById(`shopify-section-${sectionId}`);
+          if (!liveEl || !html) return;
+          const freshDoc = parser.parseFromString(html, "text/html");
+          CART_SELECTORS.forEach((sel) => {
+            const freshNodes = freshDoc.querySelectorAll(sel);
+            const liveNodes = liveEl.querySelectorAll(sel);
+            freshNodes.forEach((freshNode, i) => {
+              const liveNode = liveNodes[i];
+              if (liveNode && liveNode.parentNode) liveNode.replaceWith(freshNode.cloneNode(true));
+            });
+          });
         });
       }
     } catch (e) {
@@ -1657,7 +1931,10 @@
     if (existingToast) existingToast.remove();
 
     const root = getShopifyRoot();
-    const placeholderImg = product.image || "https://via.placeholder.com/50x50/f5f5f5/999?text=+";
+    // Was product.image (undefined — ProductCard's real field is imageUrl) —
+    // always fell through to a via.placeholder.com URL, which renders broken
+    // (live bug report, 2026-07-08).
+    const placeholderImg = product.imageUrl || "https://via.placeholder.com/50x50/f5f5f5/999?text=+";
 
     const toast = document.createElement("div");
     toast.className = "saleshq-cart-toast";
@@ -1674,7 +1951,7 @@
         <img class="saleshq-cart-toast-img" src="${placeholderImg}" alt="${product.title || 'Product'}" />
         <div class="saleshq-cart-toast-info">
           <div class="saleshq-cart-toast-name">${product.title || 'Product'}</div>
-          <div class="saleshq-cart-toast-price">₹${product.price?.amount || '0'}</div>
+          <div class="saleshq-cart-toast-price">₹${product.price ?? '0'}</div>
         </div>
       </div>
       <div class="saleshq-cart-toast-actions">

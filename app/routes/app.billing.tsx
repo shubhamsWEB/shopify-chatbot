@@ -11,7 +11,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { PLANS, PLAN_NAMES, capForPlan, findPlan, TRIAL_DAYS, TRIAL_REPLY_CAP, type PlanName } from "../intent/plans";
+import { PLANS, PLAN_NAMES, capForPlan, findPlan, TRIAL_DAYS, TRIAL_REPLY_CAP, TOPUP_PACKS, topUpPackByName, type PlanName } from "../intent/plans";
 import { monthlyReplies } from "../intent/transcript.server";
 import { ensureBillingState } from "../intent/billing.server";
 
@@ -22,13 +22,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session, billing } = await authenticate.admin(request);
   const shop = session.shop;
 
-  // Upgrade/downgrade request — throws a redirect to Shopify's approval page.
-  const upgrade = findPlan(new URL(request.url).searchParams.get("upgrade"));
+  // Upgrade/downgrade request, or a top-up pack purchase — both throw a
+  // redirect to Shopify's approval page (same mechanism, different billing
+  // config: subscription vs one-time — see shopify.server BILLING).
+  const params = new URL(request.url).searchParams;
+  const upgrade = findPlan(params.get("upgrade"));
+  const topup = topUpPackByName(params.get("topup"));
   let billingError = false;
-  if (upgrade) {
+  if (upgrade || topup) {
     try {
       return await billing.request({
-        plan: upgrade,
+        plan: (upgrade ?? topup!.name) as string,
         isTest: isTest(),
         returnUrl: `https://${shop}/admin/apps`, // back to the app after approval
       });
@@ -45,7 +49,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const [state, used] = await Promise.all([
-    ensureBillingState(shop, billing, admin, isTest()),
+    ensureBillingState(shop, admin),
     monthlyReplies(shop),
   ]);
   const meta = state.meta;
@@ -72,7 +76,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     trialEndsAt: inTrial ? meta.trialEndsAt! : null,
     used,
     cap,
+    // Top-ups only make sense once a plan is actually active — they extend a
+    // paid plan's quota, not the pre-plan trial.
+    topUpBalance: current ? (meta.topUpBalance ?? 0) : 0,
+    canTopUp: !!current,
     plans: PLAN_NAMES.map((name) => ({ name, ...PLANS[name] })),
+    topUpPacks: TOPUP_PACKS,
   };
 };
 
@@ -80,12 +89,15 @@ export default function Billing() {
   const data = useLoaderData<typeof loader>();
   // When the loader handled an upgrade it returned a redirect (no page data).
   if (!data || !("plans" in data)) return null;
-  const { current, comped, botEnabled, billingError, inTrial, trialExpired, trialDaysLeft, trialEndsAt, used, cap, plans } = data;
+  const { current, comped, botEnabled, billingError, inTrial, trialExpired, trialDaysLeft, trialEndsAt, used, cap, topUpBalance, canTopUp, plans, topUpPacks } = data;
   const trialEndLabel = trialEndsAt ? new Date(trialEndsAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
   const pct = cap ? Math.min(100, Math.round((used / cap) * 100)) : 0;
-  const over = cap != null && used >= cap;
-  const near = cap != null && !over && used / cap >= 0.8;
-  const barColor = over ? "#d72c0d" : near ? "#e0a400" : "#008060";
+  // Reaching the plan cap only actually stops the assistant once any
+  // purchased top-up balance is also spent (botGate.server spends it first).
+  const atPlanCap = cap != null && used >= cap;
+  const over = atPlanCap && topUpBalance <= 0;
+  const near = cap != null && !atPlanCap && used / cap >= 0.8;
+  const barColor = over ? "#d72c0d" : atPlanCap || near ? "#e0a400" : "#008060";
 
   return (
     <s-page heading="Plan & usage">
@@ -101,7 +113,12 @@ export default function Billing() {
       )}
       {over && botEnabled && (
         <s-banner tone="warning" heading="Monthly AI reply limit reached">
-          Your assistant is paused until the counter resets on the 1st, or upgrade below to raise the limit right away.
+          Your assistant is paused until the counter resets on the 1st — or buy a top-up pack or upgrade below to raise the limit right away.
+        </s-banner>
+      )}
+      {atPlanCap && !over && botEnabled && (
+        <s-banner tone="info" heading="Plan limit reached — running on your top-up balance">
+          You have {topUpBalance.toLocaleString()} top-up {topUpBalance === 1 ? "reply" : "replies"} left this month; the assistant keeps working until that&apos;s spent too.
         </s-banner>
       )}
       {trialExpired && botEnabled && (
@@ -130,7 +147,7 @@ export default function Billing() {
         </s-paragraph>
         {inTrial && (
           <s-paragraph>
-            <s-text tone="neutral">You&apos;re on a free trial until {trialEndLabel}. Choose a plan any time; Shopify approval starts billing after the trial terms shown at checkout.</s-text>
+            <s-text tone="neutral">You&apos;re on a free trial until {trialEndLabel}. Choose a plan any time — approving it ends the trial and starts your plan (and billing) right away, with the full plan limits.</s-text>
           </s-paragraph>
         )}
 
@@ -147,8 +164,37 @@ export default function Billing() {
               {over ? "Limit reached — assistant paused." : `${pct}% used · resets on the 1st`}
             </div>
           )}
+          {canTopUp && topUpBalance > 0 && (
+            <div style={{ fontSize: 12, color: "#008060", marginTop: 4 }}>
+              + {topUpBalance.toLocaleString()} top-up {topUpBalance === 1 ? "reply" : "replies"} available (doesn&apos;t expire monthly)
+            </div>
+          )}
         </div>
       </s-section>
+
+      {canTopUp && (
+        <s-section heading="Top up AI replies">
+          <s-paragraph>
+            <s-text tone="neutral">
+              Need more before the 1st? Buy a pack — it stacks on top of your plan and only gets spent once your monthly quota runs out. Never expires.
+            </s-text>
+          </s-paragraph>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 16, marginTop: 12 }}>
+            {topUpPacks.map((pack) => (
+              <s-box key={pack.name} padding="base" borderWidth="base" borderRadius="base">
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 20, fontWeight: 700 }}>{pack.replies.toLocaleString()}</div>
+                  <div style={{ fontSize: 12, color: "#6d7175" }}>AI replies</div>
+                  <div style={{ fontSize: 16, fontWeight: 600 }}>${pack.priceUsd}</div>
+                  <s-button variant="secondary" href={`/app/billing?topup=${encodeURIComponent(pack.name)}`}>
+                    Buy
+                  </s-button>
+                </div>
+              </s-box>
+            ))}
+          </div>
+        </s-section>
+      )}
 
       <s-section heading="Plans">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>

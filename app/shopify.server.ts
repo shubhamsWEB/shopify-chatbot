@@ -6,32 +6,44 @@ import {
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import { shopifyApi, WebhookValidationErrorReason } from "@shopify/shopify-api";
-import type { BillingConfigSubscriptionLineItemPlan } from "@shopify/shopify-api";
+import type { BillingConfigSubscriptionLineItemPlan, BillingConfigOneTimePlan } from "@shopify/shopify-api";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
-import { PLANS, PLAN_NAMES, TRIAL_DAYS, ENTRY_PLAN } from "./intent/plans";
+import { PLANS, PLAN_NAMES, ENTRY_PLAN, TOPUP_PACKS } from "./intent/plans";
 import type { AdminGraphql } from "./intent/storefront-token.server";
 
-// Tiered subscriptions, all with the configured free trial. app.tsx syncs ANY
-// active plan; the active tier drives the storefront convo cap (see
-// billing.server → syncBilling). isTest is on outside production so dev stores
-// aren't charged. PLAN kept as the default/entry tier for existing callers.
+// Tiered subscriptions. NO Shopify-side trialDays: the app's own pre-plan
+// trial (TRIAL_DAYS/TRIAL_REPLY_CAP in intent/plans.ts, run by
+// ensureBillingState) is THE trial. Approving a plan ends it and bills from
+// day one — previously each subscription carried its own 7-day free window,
+// so a merchant who picked a plan stayed labeled "Trial" for another week
+// (double-trial, 2026-07-08 report). app.tsx syncs ANY active plan; the
+// active tier drives the storefront convo cap. PLAN kept as the default/entry
+// tier for existing callers.
 export const PLAN = ENTRY_PLAN;
-export const BILLING: Record<string, BillingConfigSubscriptionLineItemPlan> = Object.fromEntries(
-  PLAN_NAMES.map((name) => [
-    name,
-    {
-      trialDays: TRIAL_DAYS,
-      lineItems: [
-        {
-          amount: PLANS[name].price,
-          currencyCode: "USD",
-          interval: BillingInterval.Every30Days,
-        },
-      ],
-    } satisfies BillingConfigSubscriptionLineItemPlan,
-  ]),
-);
+export const BILLING: Record<string, BillingConfigSubscriptionLineItemPlan | BillingConfigOneTimePlan> = {
+  ...Object.fromEntries(
+    PLAN_NAMES.map((name) => [
+      name,
+      {
+        lineItems: [
+          {
+            amount: PLANS[name].price,
+            currencyCode: "USD",
+            interval: BillingInterval.Every30Days,
+          },
+        ],
+      } satisfies BillingConfigSubscriptionLineItemPlan,
+    ]),
+  ),
+  // AI-reply top-up packs — one-time purchases, not recurring (intent/plans.ts).
+  ...Object.fromEntries(
+    TOPUP_PACKS.map((pack) => [
+      pack.name,
+      { amount: pack.priceUsd, currencyCode: "USD", interval: BillingInterval.OneTime } satisfies BillingConfigOneTimePlan,
+    ]),
+  ),
+};
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,

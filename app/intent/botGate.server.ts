@@ -1,7 +1,7 @@
 // Central kill-switch gate for all App Proxy endpoints. Reads backoffice meta
 // fresh from DB (no cache) so toggling in the developer backoffice takes effect
 // immediately on the next request.
-import { getBackofficeMeta } from "./settings.server";
+import { getBackofficeMeta, saveBackoffice } from "./settings.server";
 import { monthlyReplies } from "./transcript.server";
 import { monthlyCostUsd } from "./usage.server";
 import { trialExpired } from "./billing.server";
@@ -30,10 +30,45 @@ export async function assertBotOperational(
   }
   const [replies, costUsd] = await Promise.all([monthlyReplies(shop), monthlyCostUsd(shop)]);
   if (backoffice.convoLimit != null && replies >= backoffice.convoLimit) {
-    return Response.json(serviceStoppedBody(), { status: 503, headers: opts?.cors ? CORS : undefined });
+    // Plan quota exhausted — a purchased top-up balance (app/intent/plans.ts
+    // TOPUP_PACKS) keeps the bot operational. The gate only CHECKS the balance;
+    // spending happens in spendTopUpReply(), called by the routes that actually
+    // deliver an AI reply. Decrementing here was a live bug (2026-07-08): this
+    // gate runs on EVERY proxy route — pixel ingest (~10 events/session),
+    // history, dismiss, and proactive polls every 15s — so an over-cap shop
+    // drained its paid balance from background noise without a single reply.
+    // A top-up-funded reply also skips the $ backstop below: the pack price has
+    // margin over COST_PER_REPLY_USD baked in — it's paid for.
+    const balance = backoffice.topUpBalance ?? 0;
+    if (balance <= 0) {
+      return Response.json(serviceStoppedBody(), { status: 503, headers: opts?.cors ? CORS : undefined });
+    }
+    return null;
   }
   if (backoffice.costCapUsd != null && costUsd >= backoffice.costCapUsd) {
     return Response.json(serviceStoppedBody(), { status: 503, headers: opts?.cors ? CORS : undefined });
   }
   return null;
+}
+
+/**
+ * Spend one purchased top-up reply — call ONLY after an AI reply was actually
+ * delivered (chat answer sent, proactive nudge shown). No-op while the shop is
+ * still inside its plan quota, so callers can invoke it unconditionally.
+ * Fire-and-forget safe.
+ */
+export async function spendTopUpReply(shop: string): Promise<void> {
+  try {
+    const backoffice = await getBackofficeMeta(shop);
+    const balance = backoffice.topUpBalance ?? 0;
+    if (backoffice.convoLimit == null || balance <= 0) return;
+    const replies = await monthlyReplies(shop);
+    if (replies < backoffice.convoLimit) return; // plan quota covered this reply
+    // ponytail: read-modify-write, not an atomic decrement — a rare concurrent
+    // double-spend at the last unit is acceptable at this request volume (same
+    // tradeoff as claimEmit).
+    await saveBackoffice(shop, { ...backoffice, topUpBalance: balance - 1 });
+  } catch (err) {
+    console.error("[botGate] spendTopUpReply failed:", (err as Error).message);
+  }
 }

@@ -38,6 +38,12 @@ api_version = "2026-04"
   ]
   uri = "/webhooks/events"
 
+  # AI-reply top-up packs (one-time purchases) — credit the balance once Shopify
+  # confirms the charge, not just on the merchant's browser redirect back.
+  [[webhooks.subscriptions]]
+  topics = [ "app_purchases_one_time/update" ]
+  uri = "/webhooks/purchases"
+
 # Widget + pixel call the app through the App Proxy so Shopify HMAC-signs every
 # request with the real shop — shopId can't be spoofed and there's no CORS.
 # Storefront path: https://{shop}/apps/saleshq/* → {application_url}/proxy/*

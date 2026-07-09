@@ -7,7 +7,7 @@ import { decideProactive } from "../intent/proactive.server";
 import { appendTranscript } from "../intent/transcript.server";
 import { ingest } from "../intent/hot.server";
 import { allowLlm } from "../intent/ratelimit.server";
-import { assertBotOperational } from "../intent/botGate.server";
+import { assertBotOperational, spendTopUpReply } from "../intent/botGate.server";
 import type { CanonicalEvent, EventType } from "../intent/events";
 
 export const config = { maxDuration: 60 };
@@ -62,6 +62,10 @@ export async function action({ request }: ActionFunctionArgs) {
       await appendTranscript(shopId, body.sessionId, [
         { role: "assistant", content: result.response ?? "", products: result.products, followups: result.followups },
       ]);
+      // A nudge was actually shown — spend a purchased top-up reply if the
+      // shop is past its plan quota (no-op otherwise). Deliberately inside the
+      // show branch: polls that decide not to fire must never spend.
+      spendTopUpReply(shopId).catch(() => {});
     }
     return Response.json(result);
   } catch (err) {

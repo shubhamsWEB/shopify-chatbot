@@ -65,6 +65,8 @@ export interface BackofficeMeta {
   notes?: string;
   status?: string;            // trial | active — synced from Shopify billing
   trialEndsAt?: string | null;
+  topUpBalance?: number;      // extra AI replies purchased on top of the plan cap; never expires monthly, only spent
+  topUpPurchaseIds?: string[]; // AppPurchaseOneTime ids already credited — idempotency for the webhook (bounded, last 50)
 }
 
 export interface ShopInfo {

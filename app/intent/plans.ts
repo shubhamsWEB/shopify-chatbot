@@ -59,3 +59,37 @@ export function costCapForPlan(name?: string | null): number | null {
   const p = findPlan(name);
   return p ? PLANS[p].costCapUsd : null;
 }
+
+// Top-up packs (spec: one-time purchase, per Shopify's AppPurchaseOneTime —
+// preferred over usage-based billing for a discrete "buy more when exhausted"
+// action; simpler, matches the flat-tier model, no recurring metering). A
+// merchant only sees these once they hold an active plan (top-ups extend a
+// paid plan, not the pre-plan trial). Priced above COST_PER_REPLY_USD with a
+// volume discount at larger packs, in line with how the base plans price
+// (Starter ≈$0.058/reply) — a top-up at a similar or slightly higher per-reply
+// rate keeps margin and doesn't make "just buy more" cheaper than upgrading.
+export interface TopUpPack {
+  name: string;      // also the Shopify billing "plan" key (one-time charge name)
+  replies: number;
+  priceUsd: number;
+}
+
+// Per-reply ladder tracks the plans (Starter $0.058 → Growth $0.053 → Pro
+// $0.050) sitting just above the equivalent-volume plan rate, so a pack never
+// undercuts upgrading but never feels like a penalty either:
+//   500 → $35 ($0.070)   ·  2,000 → $119 ($0.0595)
+// 5,000 → $275 ($0.055)  · 10,000 → $499 ($0.0499)
+// All comfortably above COST_PER_REPLY_USD ($0.02 blended COGS).
+export const TOPUP_PACKS: TopUpPack[] = [
+  { name: "Top-up 500", replies: 500, priceUsd: 35 },
+  { name: "Top-up 2000", replies: 2000, priceUsd: 119 },
+  { name: "Top-up 5000", replies: 5000, priceUsd: 275 },
+  { name: "Top-up 10000", replies: 10000, priceUsd: 499 },
+];
+
+export const TOPUP_PACK_NAMES = TOPUP_PACKS.map((p) => p.name);
+
+export function topUpPackByName(name?: string | null): TopUpPack | null {
+  if (!name) return null;
+  return TOPUP_PACKS.find((p) => p.name === name) ?? null;
+}

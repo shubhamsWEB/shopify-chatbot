@@ -12,7 +12,7 @@ import { authenticate } from "../shopify.server";
 import { runChat } from "../intent/chat.server";
 import { allowLlm } from "../intent/ratelimit.server";
 import { appendTranscript } from "../intent/transcript.server";
-import { assertBotOperational } from "../intent/botGate.server";
+import { assertBotOperational, spendTopUpReply } from "../intent/botGate.server";
 import { linkSessionToCustomer } from "../intent/identity.server";
 import { ingest } from "../intent/hot.server";
 import type { CanonicalEvent, EventType } from "../intent/events";
@@ -23,6 +23,11 @@ const Body = z.object({
   sessionId: z.string().min(1),
   message: z.string().min(1).optional(),
   history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional(),
+  cart: z.object({
+    items: z.array(z.object({ title: z.string(), quantity: z.number(), price: z.number().optional() })),
+    total: z.number().optional(),
+    currency: z.string().optional(),
+  }).optional(),
 });
 
 function logBot(shopId: string, sessionId: string, type: EventType, productId?: string, customerId?: string) {
@@ -58,7 +63,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const send = (o: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(o)}\n\n`));
       try {
         const result = await runChat({
-          shopId, sessionId: body.sessionId, message: body.message, history: body.history, customerId, admin,
+          shopId, sessionId: body.sessionId, message: body.message, history: body.history, cart: body.cart, customerId, admin,
           stream: { onText: (t) => send({ type: "delta", text: t }), onReset: () => send({ type: "reset" }) },
         });
         if (result.comparison) logBot(shopId, body.sessionId, "bot_comparison_shown", undefined, customerId);
@@ -69,6 +74,7 @@ export async function action({ request }: ActionFunctionArgs) {
             { role: "assistant", content: result.response, products: result.products, followups: result.followups },
           ]);
         }
+        spendTopUpReply(shopId).catch(() => {}); // over-quota shops pay from top-up balance per delivered reply
         send({ type: "done", ...result });
       } catch (err) {
         console.error("chat stream failed", err);

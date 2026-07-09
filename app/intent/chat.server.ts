@@ -120,6 +120,9 @@ ADDING TO CART:
 - If it returns outOfStock or variantUnavailable, say so in one line and offer an in-stock alternative via search_products.
 - On success (ok:true) confirm in ONE short line what you added (name + option if any). The cart updates on their screen automatically, so don't tell them to click anything.
 
+READING THE CART:
+- "What's in my cart" / "how much is my cart" — answer directly from the CURRENT CART block below (real storefront data). No tool call needed. If it says "empty", say so plainly.
+
 JUST BROWSING / EXPLORING:
 - If the shopper is clearly undecided or "just looking" and hasn't named a product or category, DON'T push one specific item. Call get_categories and invite them to pick a direction. The categories are shown as tappable options, so keep your line to one warm sentence and do NOT list a specific product.
 
@@ -149,12 +152,23 @@ RESPONSE STYLE (keep it clean and scannable):
 
 // Volatile per-shopper context — separate system block, rendered AFTER the
 // cached static block so it never invalidates the shared prefix.
-const DYNAMIC_SYSTEM = (profile: IntentProfile | null, live: unknown) =>
+const DYNAMIC_SYSTEM = (profile: IntentProfile | null, live: unknown, cart: CartSnapshot | undefined) =>
   `SHOPPER INTENT PROFILE:
 ${profile ? JSON.stringify(profile) : "(none yet — first interaction)"}
 
 LIVE CONTEXT (what they're doing right now):
-${JSON.stringify(live ?? {})}`;
+${JSON.stringify(live ?? {})}
+
+CURRENT CART (ground truth from the storefront right now — use this to answer
+"what's in my cart" / "how much is my cart" directly, no tool needed; trust
+this over anything said earlier in the conversation):
+${cart && cart.items.length ? JSON.stringify(cart) : "empty"}`;
+
+export interface CartSnapshot {
+  items: Array<{ title: string; quantity: number; price?: number }>;
+  total?: number;
+  currency?: string;
+}
 
 // Client action: the widget performs the cart add (Ajax /cart/add.js) and
 // refreshes the storefront cart UI live, so the shopper sees it without clicking.
@@ -195,6 +209,7 @@ export async function runChat(args: {
   message?: string;
   trigger?: { type: string; productId?: string };
   history?: Array<{ role: "user" | "assistant"; content: string }>;
+  cart?: CartSnapshot; // widget-supplied /cart.js snapshot — the only source of truth for "what's in my cart"
   // When present, the final answer is streamed token-by-token: onText for each
   // delta, onReset to discard interim text before a tool-calling turn continues.
   stream?: { onText: (t: string) => void; onReset: () => void };
@@ -216,7 +231,7 @@ export async function runChat(args: {
   // second, uncached block so per-turn changes don't invalidate the prefix.
   const system: Anthropic.TextBlockParam[] = [
     { type: "text", text: STATIC_SYSTEM(settings.brandDescription), cache_control: { type: "ephemeral" } },
-    { type: "text", text: DYNAMIC_SYSTEM(profile, liveContext) },
+    { type: "text", text: DYNAMIC_SYSTEM(profile, liveContext, args.cart) },
   ];
 
   // Semantic neighbors: products favored by similar-intent shoppers (pgvector).
@@ -350,7 +365,16 @@ export async function runChat(args: {
   const WORKER = process.env.TOOL_LOOP_MODEL || HAIKU;
   const MAX_TURNS = 8;
   let content: Anthropic.ContentBlock[] = [];
-  let composing = WORKER === CHAT_MODEL; // no split when worker == final model
+  // Cart-mutation intent skips the cheap worker entirely — root-caused live
+  // (2026-07-08): Haiku misread "add this pillow in pebble grey to my cart"
+  // (product only referenced pronominally, established several turns back) and
+  // called search_products instead of add_to_cart; Sonnet then just described
+  // the search results as text instead of recovering the actual intent — the
+  // bot claimed nothing, silently failed to add. Cart actions are high-stakes
+  // (shopper trusts "added to cart" to be true) — worth Sonnet's cost for
+  // reliable tool selection, not just composition.
+  const looksLikeCartIntent = /\b(add|buy|purchase|order|get me)\b.*\b(cart|this|it|that)\b/i.test(args.message ?? "");
+  let composing = WORKER === CHAT_MODEL || looksLikeCartIntent;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const model = composing ? CHAT_MODEL : WORKER;
     // Only the final Sonnet compose streams to the shopper; worker turns are
@@ -368,6 +392,7 @@ export async function runChat(args: {
     recordUsage(args.shopId, model, res.usage);
     content = res.content;
     messages.push({ role: "assistant", content });
+    console.log("[chat] turn", turn, "model", model, "stop", res.stop_reason, "blocks", content.map((b) => (b.type === "tool_use" ? `tool_use:${b.name}` : b.type === "text" ? `text:${b.text.length}ch` : b.type)));
 
     const toolUses = content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
     if (toolUses.length === 0) {
@@ -386,8 +411,11 @@ export async function runChat(args: {
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const b of toolUses) {
       try {
-        results.push({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(await execTool(b.name, b.input)) });
+        const r = await execTool(b.name, b.input);
+        console.log("[chat] tool", b.name, JSON.stringify(b.input), "->", JSON.stringify(r).slice(0, 300));
+        results.push({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(r) });
       } catch (err) {
+        console.error("[chat] tool error", b.name, JSON.stringify(b.input), (err as Error).message);
         results.push({ type: "tool_result", tool_use_id: b.id, is_error: true, content: (err as Error).message });
       }
     }

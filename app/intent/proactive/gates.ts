@@ -24,10 +24,17 @@ export type EligibilityConfig = typeof config.eligibility;
 // checked in the signal gate, once the specific reason is known). (spec §6.1)
 export function eligibilityGate(s: GateInput, elig: EligibilityConfig = config.eligibility): "eligibility" | null {
   const c = elig;
+  // NOTE: `popups.dismissed` (a static bool derived from event history) is
+  // deliberately NOT checked on its own — it never expires, so any dismiss
+  // event still inside the last-50-event ring (e.g. from days-old testing on
+  // a persistent 30-day cookie) would silence the session forever. The time-
+  // bounded `cooldownUntil` (dismiss timestamp + dismissCooldownMs) is the
+  // actual "recently dismissed" signal; found live via real-browser testing
+  // (2026-07-07) — an old dismiss on a reused dev cookie was blocking every
+  // popup with no way to recover.
   const fail =
     s.holdout ||
     s.now - s.startedAt < c.minSessionAgeMs ||
-    s.popups.dismissed ||
     s.now < s.popups.cooldownUntil ||
     s.popups.shownCount >= c.maxPerSession ||
     s.popups.unansweredCount >= c.maxUnansweredPerSession ||

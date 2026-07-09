@@ -8,7 +8,8 @@ import { runChat } from "../intent/chat.server";
 import { ingest } from "../intent/hot.server";
 import { allowLlm } from "../intent/ratelimit.server";
 import { appendTranscript } from "../intent/transcript.server";
-import { assertBotOperational } from "../intent/botGate.server";
+import { assertBotOperational, spendTopUpReply } from "../intent/botGate.server";
+import { linkSessionToCustomer } from "../intent/identity.server";
 import type { CanonicalEvent, EventType } from "../intent/events";
 
 export const config = { maxDuration: 60 };
@@ -18,6 +19,11 @@ const Body = z.object({
   message: z.string().min(1).optional(),
   trigger: z.object({ type: z.string(), productId: z.string().optional() }).optional(),
   history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).optional(),
+  cart: z.object({
+    items: z.array(z.object({ title: z.string(), quantity: z.number(), price: z.number().optional() })),
+    total: z.number().optional(),
+    currency: z.string().optional(),
+  }).optional(),
 });
 
 function logBot(shopId: string, sessionId: string, type: EventType, productId?: string) {
@@ -30,9 +36,15 @@ function logBot(shopId: string, sessionId: string, type: EventType, productId?: 
 
 export async function action({ request }: ActionFunctionArgs) {
   // Verifies the proxy signature + that the shop has the app installed.
-  const { session } = await authenticate.public.appProxy(request);
+  const { session, admin } = await authenticate.public.appProxy(request);
   if (!session?.shop) return new Response("Unauthorized", { status: 401 });
   const shopId = session.shop;
+  // Shopify appends this to the signed proxy request only when the shopper is
+  // logged in — never trust anything else for identity. This route never read
+  // it (proxy.chat-stream.tsx did, but the widget doesn't call that route at
+  // all — dead code), so get_my_orders/track_order/reorder always saw a guest,
+  // even for a signed-in shopper (live bug report, 2026-07-07).
+  const customerId = new URL(request.url).searchParams.get("logged_in_customer_id") || undefined;
 
   let body;
   try {
@@ -53,8 +65,11 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ response: payload.message, products: [], serviceStopped: true }, { status: 503 });
   }
 
+  // Stitches this session's guest browsing onto the customer once they log in.
+  if (customerId) linkSessionToCustomer(shopId, body.sessionId, customerId).catch(() => {});
+
   try {
-    const result = await runChat({ ...body, shopId });
+    const result = await runChat({ ...body, shopId, customerId, admin });
     if (result.comparison) logBot(shopId, body.sessionId, "bot_comparison_shown");
     for (const p of result.products) logBot(shopId, body.sessionId, "bot_suggestion_shown", p.productId);
     // Durable transcript so returning visitors get their conversation back.
@@ -64,6 +79,9 @@ export async function action({ request }: ActionFunctionArgs) {
         { role: "assistant", content: result.response, products: result.products, followups: result.followups },
       ]);
     }
+    // Over-quota shops run on purchased top-up replies; spend one now that a
+    // reply was actually delivered (no-op while inside the plan quota).
+    spendTopUpReply(shopId).catch(() => {});
     return Response.json(result);
   } catch (err) {
     console.error("chat failed", err);

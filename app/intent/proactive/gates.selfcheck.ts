@@ -29,7 +29,8 @@ const base = (over: Partial<GateInput> = {}): GateInput => ({
 assert.equal(eligibilityGate(base()), null, "eligible baseline passes");
 assert.equal(eligibilityGate(base({ holdout: true })), "eligibility", "holdout fails");
 assert.equal(eligibilityGate(base({ startedAt: NOW - 1000 })), "eligibility", "too-new session fails");
-assert.equal(eligibilityGate(base({ popups: { ...emptyPopups(), dismissed: true } })), "eligibility", "dismissed fails");
+assert.equal(eligibilityGate(base({ popups: { ...emptyPopups(), dismissed: true, cooldownUntil: NOW + 1000 } })), "eligibility", "recently dismissed (cooldownUntil in the future) fails");
+assert.equal(eligibilityGate(base({ popups: { ...emptyPopups(), dismissed: true, cooldownUntil: NOW - 1000 } })), null, "a stale dismiss (cooldownUntil passed) does NOT block forever — regression test for the permanent-silence bug");
 assert.equal(eligibilityGate(base({ popups: { ...emptyPopups(), cooldownUntil: NOW + 1000 } })), "eligibility", "cooldown fails");
 assert.equal(eligibilityGate(base({ popups: { ...emptyPopups(), shownCount: config.eligibility.maxPerSession } })), "eligibility", "max-per-session fails");
 assert.equal(eligibilityGate(base({ popups: { ...emptyPopups(), unansweredCount: config.eligibility.maxUnansweredPerSession } })), "eligibility", "4 unanswered nudges stops auto-nudge");
