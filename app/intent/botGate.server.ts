@@ -29,6 +29,19 @@ export async function assertBotOperational(
     return Response.json(serviceStoppedBody(), { status: 503, headers: opts?.cors ? CORS : undefined });
   }
   const [replies, costUsd] = await Promise.all([monthlyReplies(shop), monthlyCostUsd(shop)]);
+  // Fire the usage nudges inline as usage crosses 80% — no wait for the daily
+  // cron. dispatchCampaign runs every due step, so this one trigger covers both
+  // the 80% warn and (once replies >= convoLimit) the 100% exhausted email.
+  // Fire-and-forget (no await) → zero added latency; idempotent via claimStep,
+  // so re-entry on every request/poll sends each step at most once per month.
+  // ponytail: re-queries backoffice+replies inside the campaign on each request
+  // once past 80%. Fine at current volume; if high-usage shops polling every
+  // 15s get costly, debounce with a short KV flag before dispatching.
+  if (backoffice.convoLimit != null && replies >= 0.8 * backoffice.convoLimit) {
+    void import("../nudges/dispatch.server")
+      .then((m) => m.dispatchCampaign(shop, "usage-limit"))
+      .catch((err) => console.error("inline usage-limit nudge failed", err));
+  }
   if (backoffice.convoLimit != null && replies >= backoffice.convoLimit) {
     // Plan quota exhausted — a purchased top-up balance (app/intent/plans.ts
     // TOPUP_PACKS) keeps the bot operational. The gate only CHECKS the balance;

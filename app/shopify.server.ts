@@ -97,6 +97,22 @@ const shopify = shopifyApp({
         // ponytail: create throws if a pixel already exists — fine, ingestUrl is stable.
         console.warn("webPixelCreate skipped:", (err as Error).message);
       }
+
+      // Sync store details first (name/owner) so the day-0 welcome is
+      // personalized, then send it immediately on install — this also seeds the
+      // onboarding anchor; days 1/3/7 follow via the daily cron. Only the
+      // welcome step is due at t=0. Fire-and-forget — never block install; if no
+      // owner email is resolvable yet the cron retries.
+      void (async () => {
+        try {
+          const { syncShopInfo } = await import("./intent/shopinfo.server");
+          await syncShopInfo(session.shop, admin as unknown as Parameters<typeof syncShopInfo>[1]);
+        } catch (err) {
+          console.error("shopInfo sync before welcome failed:", (err as Error).message);
+        }
+        const { dispatchCampaign } = await import("./nudges/dispatch.server");
+        await dispatchCampaign(session.shop, "onboarding");
+      })().catch((err) => console.error("welcome-on-install failed:", (err as Error).message));
     },
   },
 });
