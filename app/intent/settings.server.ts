@@ -67,6 +67,8 @@ export interface BackofficeMeta {
   trialEndsAt?: string | null;
   topUpBalance?: number;      // extra AI replies purchased on top of the plan cap; never expires monthly, only spent
   topUpPurchaseIds?: string[]; // AppPurchaseOneTime ids already credited — idempotency for the webhook (bounded, last 50)
+  pdfPageLimit?: number | null; // monthly PDF-import page cap; null = unlimited (comped)
+  pdfPageBalance?: number;    // bundled top-up PDF pages; never expires, spent only when a parse exceeds the monthly cap
 }
 
 export interface ShopInfo {
@@ -115,6 +117,14 @@ function ensureTable(): Promise<void> {
     .then(() =>
       prisma.$executeRawUnsafe(
         `ALTER TABLE "ShopSettings" ADD COLUMN IF NOT EXISTS "backoffice" JSONB NOT NULL DEFAULT '{}'`,
+      ),
+    )
+    // Found by the OKF E2E on a fresh DB (2026-07-09): this column only ever
+    // reached prod via an out-of-band db push, so the lazy path silently broke
+    // every getSettings read on a clean database.
+    .then(() =>
+      prisma.$executeRawUnsafe(
+        `ALTER TABLE "ShopSettings" ADD COLUMN IF NOT EXISTS "shopInfo" JSONB NOT NULL DEFAULT '{}'`,
       ),
     )
     .then(() => undefined)

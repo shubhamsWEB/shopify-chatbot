@@ -17,7 +17,7 @@
     "shopify": "shopify",
     "prisma": "prisma",
     "graphql-codegen": "graphql-codegen",
-    "selfcheck": "tsx app/intent/derive.selfcheck.ts && tsx app/intent/signals.selfcheck.ts && tsx app/intent/proactive/gates.selfcheck.ts",
+    "selfcheck": "tsx app/intent/derive.selfcheck.ts && tsx app/intent/signals.selfcheck.ts && tsx app/intent/proactive/gates.selfcheck.ts && tsx app/intent/knowledge.selfcheck.ts",
     "check:stats-alignment": "tsx scripts/check-stats-alignment.ts",
     "backfill:reply-count": "tsx scripts/backfill-reply-count.ts",
     "vite": "vite",

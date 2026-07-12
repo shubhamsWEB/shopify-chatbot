@@ -33,9 +33,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await saveBackoffice(shop, {
       ...meta,
       topUpBalance: (meta.topUpBalance ?? 0) + pack.replies,
+      // Bundled PDF pages ride along on every pack (plans.ts) — same
+      // non-expiring-balance semantics as the replies.
+      pdfPageBalance: (meta.pdfPageBalance ?? 0) + pack.pdfPages,
       topUpPurchaseIds: [...processed, purchase.admin_graphql_api_id].slice(-50),
     });
-    console.log(`[topup] credited ${pack.replies} replies to ${shop} (${purchase.name}, ${purchase.admin_graphql_api_id})`);
+    console.log(`[topup] credited ${pack.replies} replies + ${pack.pdfPages} PDF pages to ${shop} (${purchase.name}, ${purchase.admin_graphql_api_id})`);
   } catch (err) {
     console.error("[topup] credit failed:", (err as Error).message);
   }

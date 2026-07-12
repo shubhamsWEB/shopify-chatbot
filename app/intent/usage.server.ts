@@ -9,9 +9,16 @@ const PRICES: Record<string, { in: number; out: number }> = {
   "claude-sonnet-5": { in: 2, out: 10 },
   "claude-sonnet-4-6": { in: 3, out: 15 },
   "claude-haiku-4-5": { in: 1, out: 5 },
+  // Gemini Flash — used for one-off PDF→OKF extraction (knowledge uploads).
+  // 3-flash priced as a ceiling until GA pricing is confirmed.
+  "gemini-3-flash-preview": { in: 0.5, out: 3 },
+  "gemini-2.5-flash": { in: 0.3, out: 2.5 },
+  "gemini-2.5-flash-lite": { in: 0.1, out: 0.4 },
+  "gemini-2.0-flash": { in: 0.1, out: 0.4 },
 };
 const priceFor = (model: string) =>
-  PRICES[model] ?? (model.includes("haiku") ? PRICES["claude-haiku-4-5"] : PRICES["claude-sonnet-5"]);
+  PRICES[model] ??
+  (model.includes("gemini") ? PRICES["gemini-2.5-flash"] : model.includes("haiku") ? PRICES["claude-haiku-4-5"] : PRICES["claude-sonnet-5"]);
 
 export interface UsageLike {
   input_tokens: number;

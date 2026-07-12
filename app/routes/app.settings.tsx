@@ -3,7 +3,7 @@
 // and enforced server-side (nudge gates) + in the widget (timings, cues).
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useState } from "react";
-import { useLoaderData, useFetcher, useRouteError } from "react-router";
+import { useLoaderData, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getSettings, saveSettings, normalizeConfig, DEFAULT_WELCOME, type BotConfig } from "../intent/settings.server";
@@ -164,6 +164,4 @@ export default function Settings() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);
-export function ErrorBoundary() {
-  return boundary.error(useRouteError());
-}
+export { EmbeddedErrorBoundary as ErrorBoundary } from "../embedded-boundary";

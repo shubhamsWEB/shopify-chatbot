@@ -1,7 +1,7 @@
 // Shopper insights: what groups of shoppers want, and what individual active
 // shoppers are trying to do right now — in plain language, no engine jargon.
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, useRouteError } from "react-router";
+import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -69,7 +69,7 @@ export default function IntentProfiles() {
 
       <s-section heading="Recent shoppers">
         <s-text tone="neutral">
-          What individual shoppers were trying to do, in the assistant's own words, with the action it recommends.
+          What individual shoppers were trying to do, in the assistant&apos;s own words, with the action it recommends.
         </s-text>
         {d.profiles.length === 0 ? (
           <s-paragraph><s-text tone="neutral">No shopper stories yet — they appear as visitors browse.</s-text></s-paragraph>
@@ -101,6 +101,4 @@ export default function IntentProfiles() {
 }
 
 export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);
-export function ErrorBoundary() {
-  return boundary.error(useRouteError());
-}
+export { EmbeddedErrorBoundary as ErrorBoundary } from "../embedded-boundary";

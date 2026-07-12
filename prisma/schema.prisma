@@ -132,6 +132,53 @@ model EventRollup {
   @@id([shop, day, type])
 }
 
+// Shopper questions search_knowledge couldn't answer — the merchant-facing
+// "knowledge gaps" list. Deduped per normalized query; publishing a doc that
+// covers a gap auto-resolves it. Lazy-created (knowledgegaps.server.ts).
+model KnowledgeGap {
+  id         String   @id
+  shop       String
+  queryKey   String
+  query      String
+  count      Int      @default(1)
+  status     String   @default("open")
+  firstAsked DateTime @default(now()) @db.Timestamptz(3)
+  lastAsked  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([shop, queryKey])
+}
+
+// Monthly PDF-import page usage — gates the plan's PDF page cap (plans.ts
+// PDF_PAGE_CAPS). Lazy-created like ReplyCount, which it mirrors exactly.
+model PdfPageCount {
+  shop  String
+  day   DateTime @db.Date
+  pages Int      @default(0)
+
+  @@id([shop, day])
+}
+
+// Per-shop OKF knowledge documents (FAQs, policies, offers) the bot answers
+// from. All reads/writes go through raw SQL in knowledge.server.ts; this model
+// just keeps `prisma generate` aware of the lazily-created table. Lazy-created
+// like ShopSettings.
+model KnowledgeDoc {
+  id            String    @id
+  shop          String
+  kind          String    @default("general")
+  title         String    @default("")
+  body          String    @default("")
+  sections      Json      @default("[]")
+  tags          String[]  @default([])
+  effectiveFrom DateTime? @db.Timestamptz(3)
+  effectiveTo   DateTime? @db.Timestamptz(3)
+  status        String    @default("published")
+  sourceBlobUrl String?
+  updatedAt     DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([shop])
+}
+
 // Per-day LLM usage metering (real token counts from response.usage) — powers
 // the dashboard's actual-cost panel. Lazy-created like ShopSettings.
 model LlmUsage {
@@ -146,4 +193,17 @@ model LlmUsage {
   costUsd          Float    @default(0)
 
   @@id([shop, day, model])
+}
+
+// Nudge/email engine state (app/nudges). One row per (shop, campaign, step)
+// that was sent — presence = idempotency guard. The reserved step
+// "__enrolled__" stores the enrollment anchor a series times from.
+model NudgeLog {
+  shop     String
+  campaign String
+  step     String
+  sentAt   DateTime @default(now())
+
+  @@id([shop, campaign, step])
+  @@index([shop])
 }

@@ -11,7 +11,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { PLANS, PLAN_NAMES, capForPlan, findPlan, TRIAL_DAYS, TRIAL_REPLY_CAP, TOPUP_PACKS, topUpPackByName, type PlanName } from "../intent/plans";
+import { PLANS, PLAN_NAMES, capForPlan, findPlan, TRIAL_DAYS, TRIAL_REPLY_CAP, TOPUP_PACKS, topUpPackByName, PDF_PAGE_CAPS, type PlanName } from "../intent/plans";
 import { monthlyReplies } from "../intent/transcript.server";
 import { ensureBillingState } from "../intent/billing.server";
 
@@ -80,7 +80,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // paid plan's quota, not the pre-plan trial.
     topUpBalance: current ? (meta.topUpBalance ?? 0) : 0,
     canTopUp: !!current,
-    plans: PLAN_NAMES.map((name) => ({ name, ...PLANS[name] })),
+    plans: PLAN_NAMES.map((name) => ({ name, ...PLANS[name], pdfPages: PDF_PAGE_CAPS[name] })),
     topUpPacks: TOPUP_PACKS,
   };
 };
@@ -176,7 +176,7 @@ export default function Billing() {
         <s-section heading="Top up AI replies">
           <s-paragraph>
             <s-text tone="neutral">
-              Need more before the 1st? Buy a pack — it stacks on top of your plan and only gets spent once your monthly quota runs out. Never expires.
+              Need more before the 1st? Buy a pack — it stacks on top of your plan and only gets spent once your monthly quota runs out. Never expires. Every pack also includes bonus PDF knowledge pages.
             </s-text>
           </s-paragraph>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 16, marginTop: 12 }}>
@@ -185,6 +185,7 @@ export default function Billing() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <div style={{ fontSize: 20, fontWeight: 700 }}>{pack.replies.toLocaleString()}</div>
                   <div style={{ fontSize: 12, color: "#6d7175" }}>AI replies</div>
+                  <div style={{ fontSize: 12, color: "#008060", fontWeight: 600 }}>+ {pack.pdfPages.toLocaleString()} PDF pages</div>
                   <div style={{ fontSize: 16, fontWeight: 600 }}>${pack.priceUsd}</div>
                   <s-button variant="secondary" href={`/app/billing?topup=${encodeURIComponent(pack.name)}`}>
                     Buy
@@ -214,6 +215,9 @@ export default function Billing() {
                     <div style={{ fontSize: 13, color: "#6d7175", marginTop: 4 }}>{p.blurb}</div>
                     <div style={{ fontSize: 14, marginTop: 12, fontWeight: 600 }}>
                       {p.replies.toLocaleString()} AI replies / mo
+                    </div>
+                    <div style={{ fontSize: 13, marginTop: 4, color: "#6d7175" }}>
+                      {p.pdfPages.toLocaleString()} PDF knowledge pages / mo
                     </div>
                   </div>
                   <div style={{ marginTop: 12 }}>

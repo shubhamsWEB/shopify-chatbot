@@ -60,6 +60,28 @@ export function costCapForPlan(name?: string | null): number | null {
   return p ? PLANS[p].costCapUsd : null;
 }
 
+// PDF-import page budget, per billing cycle (audit 2026-07-09). Each Gemini
+// parse costs ~$0.0008/page at list price — trivial per document, but with no
+// per-plan cap a merchant could script thousands of pages/day. The ladder
+// mirrors the reply caps: makes PDF import a visible plan-tier perk and bounds
+// worst-case cost per shop. Enforced against a monthly PdfPageCount counter
+// (pdfparse.server.ts), separate from the daily per-shop rate limit (abuse
+// guard) that already exists.
+export const TRIAL_PDF_PAGE_CAP = 50;
+export const PDF_PAGE_CAPS: Record<PlanName, number> = {
+  Starter: 200,
+  Growth: 600,
+  Pro: 2000,
+};
+
+/** Monthly PDF page cap for a plan name. comped = unlimited (null); unknown
+ * (incl. "trial") = null — callers use TRIAL_PDF_PAGE_CAP for the pre-plan trial. */
+export function pdfPageCapFor(name?: string | null): number | null {
+  if (name && name.toLowerCase() === "comped") return null;
+  const p = findPlan(name);
+  return p ? PDF_PAGE_CAPS[p] : null;
+}
+
 // Top-up packs (spec: one-time purchase, per Shopify's AppPurchaseOneTime —
 // preferred over usage-based billing for a discrete "buy more when exhausted"
 // action; simpler, matches the flat-tier model, no recurring metering). A
@@ -71,6 +93,7 @@ export function costCapForPlan(name?: string | null): number | null {
 export interface TopUpPack {
   name: string;      // also the Shopify billing "plan" key (one-time charge name)
   replies: number;
+  pdfPages: number;  // bundled PDF-import pages (replies/10) — non-expiring balance, spent after the monthly plan cap
   priceUsd: number;
 }
 
@@ -81,10 +104,10 @@ export interface TopUpPack {
 // 5,000 → $275 ($0.055)  · 10,000 → $499 ($0.0499)
 // All comfortably above COST_PER_REPLY_USD ($0.02 blended COGS).
 export const TOPUP_PACKS: TopUpPack[] = [
-  { name: "Top-up 500", replies: 500, priceUsd: 35 },
-  { name: "Top-up 2000", replies: 2000, priceUsd: 119 },
-  { name: "Top-up 5000", replies: 5000, priceUsd: 275 },
-  { name: "Top-up 10000", replies: 10000, priceUsd: 499 },
+  { name: "Top-up 500", replies: 500, pdfPages: 50, priceUsd: 35 },
+  { name: "Top-up 2000", replies: 2000, pdfPages: 200, priceUsd: 119 },
+  { name: "Top-up 5000", replies: 5000, pdfPages: 500, priceUsd: 275 },
+  { name: "Top-up 10000", replies: 10000, pdfPages: 1000, priceUsd: 499 },
 ];
 
 export const TOPUP_PACK_NAMES = TOPUP_PACKS.map((p) => p.name);

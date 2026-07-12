@@ -3,7 +3,7 @@
 // the merchant's active tier becomes their plan + monthly convo cap, with no
 // extra storefront code (proxy.chat → assertBotOperational reads convoLimit).
 import type { authenticate } from "../shopify.server";
-import { PLANS, PLAN_NAMES, TRIAL_DAYS, capForPlan, costCapForPlan, TRIAL_REPLY_CAP, TRIAL_COST_CAP_USD, type PlanName } from "./plans";
+import { PLANS, PLAN_NAMES, TRIAL_DAYS, capForPlan, costCapForPlan, pdfPageCapFor, TRIAL_REPLY_CAP, TRIAL_COST_CAP_USD, TRIAL_PDF_PAGE_CAP, type PlanName } from "./plans";
 import { getBackofficeMeta, saveBackoffice, type BackofficeMeta } from "./settings.server";
 
 type AdminCtx = Awaited<ReturnType<typeof authenticate.admin>>;
@@ -98,10 +98,11 @@ export async function ensureBillingState(shop: string, admin: Admin): Promise<Bi
       const planChanged = meta.plan !== plan;
       const convoLimit = planChanged || meta.convoLimit == null ? capForPlan(plan) : meta.convoLimit;
       const costCapUsd = planChanged || meta.costCapUsd == null ? costCapForPlan(plan) : meta.costCapUsd;
-      const next = { ...meta, plan, convoLimit, costCapUsd, status, trialEndsAt };
+      const pdfPageLimit = planChanged || meta.pdfPageLimit == null ? pdfPageCapFor(plan) : meta.pdfPageLimit;
+      const next = { ...meta, plan, convoLimit, costCapUsd, pdfPageLimit, status, trialEndsAt };
       if (
         meta.plan !== plan || meta.convoLimit !== convoLimit || meta.costCapUsd !== costCapUsd ||
-        meta.status !== status || meta.trialEndsAt !== trialEndsAt
+        meta.pdfPageLimit !== pdfPageLimit || meta.status !== status || meta.trialEndsAt !== trialEndsAt
       ) {
         await saveBackoffice(shop, next);
       }
@@ -124,8 +125,8 @@ export async function ensureBillingState(shop: string, admin: Admin): Promise<Bi
     }
 
     if (trialExpired(meta)) {
-      const next = { ...meta, status: "trial_expired", trialEndsAt: meta.trialEndsAt ?? null, convoLimit: 0, costCapUsd: 0 };
-      if (meta.status !== next.status || meta.convoLimit !== 0 || meta.costCapUsd !== 0) await saveBackoffice(shop, next);
+      const next = { ...meta, status: "trial_expired", trialEndsAt: meta.trialEndsAt ?? null, convoLimit: 0, costCapUsd: 0, pdfPageLimit: 0 };
+      if (meta.status !== next.status || meta.convoLimit !== 0 || meta.costCapUsd !== 0 || meta.pdfPageLimit !== 0) await saveBackoffice(shop, next);
       return { meta: next, activePlan: null, trialActive: false };
     }
 
@@ -140,11 +141,12 @@ export async function ensureBillingState(shop: string, admin: Admin): Promise<Bi
       plan: "trial",
       convoLimit: TRIAL_REPLY_CAP,
       costCapUsd: TRIAL_COST_CAP_USD,
+      pdfPageLimit: TRIAL_PDF_PAGE_CAP,
       status: "trial",
       trialEndsAt,
     };
     // First-time write, OR the plan just lapsed from a real tier back to trial.
-    if (meta.plan !== "trial" || meta.status !== "trial" || meta.convoLimit !== TRIAL_REPLY_CAP) {
+    if (meta.plan !== "trial" || meta.status !== "trial" || meta.convoLimit !== TRIAL_REPLY_CAP || meta.pdfPageLimit !== TRIAL_PDF_PAGE_CAP) {
       await saveBackoffice(shop, next);
     }
     return { meta: next, activePlan: null, trialActive: true };

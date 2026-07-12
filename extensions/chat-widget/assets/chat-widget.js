@@ -1735,12 +1735,20 @@
       return false;
     }
 
-    typingEl.remove();
-    // Live assistant bubble we append tokens into.
-    const msgEl = addMessage("assistant", "");
-    const bubble = msgEl.querySelector("div"); // the bubbleHtml wrapper
+    // Keep the typing animation up until the FIRST token actually arrives —
+    // the stream's headers land immediately but internal tool turns can run
+    // for seconds first, and an empty bubble reads as broken. The live bubble
+    // is created lazily on the first delta.
+    let msgEl = null;
+    let bubble = null;
     let acc = "";
     let done = null;
+    const ensureBubble = () => {
+      if (msgEl) return;
+      typingEl.remove();
+      msgEl = addMessage("assistant", "");
+      bubble = msgEl.querySelector("div"); // the bubbleHtml wrapper
+    };
     const paint = () => { if (bubble) { bubble.innerHTML = parseMarkdown(acc); messagesEl.scrollTop = messagesEl.scrollHeight; } };
 
     const reader = res.body.getReader();
@@ -1760,22 +1768,25 @@
           let evt;
           try { evt = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
           if (evt.type === "reset") { acc = ""; paint(); }
-          else if (evt.type === "delta") { acc += evt.text || ""; paint(); }
+          else if (evt.type === "delta") { acc += evt.text || ""; ensureBubble(); paint(); }
           else if (evt.type === "done") { done = evt; }
-          else if (evt.type === "error") { acc = evt.message || "Sorry, I'm having trouble right now. Please try again."; paint(); }
+          else if (evt.type === "error") { acc = evt.message || "Sorry, I'm having trouble right now. Please try again."; ensureBubble(); paint(); }
         }
       }
     } catch (e) {
-      // Mid-stream failure after we already committed the bubble: if nothing
-      // arrived, drop the empty bubble + its history entry and signal fallback;
-      // otherwise keep what we have.
-      if (!acc && !done) { msgEl.remove(); state.history.pop(); saveState(); return false; }
+      // Mid-stream failure: if nothing arrived, drop the bubble (if one was
+      // ever created) + its history entry and signal fallback; else keep text.
+      if (!acc && !done) {
+        if (msgEl) { msgEl.remove(); state.history.pop(); saveState(); }
+        return false;
+      }
     }
 
     // Finalize with the authoritative text + extras from the done frame.
     if (done) {
       if (done.serviceStopped) { acc = done.message || done.response || acc; }
       else if (done.response) { acc = done.response; }
+      ensureBubble(); // stream may finish with only a done frame (no deltas)
       paint();
       // Persist so refresh/reopen restores cards + chips (addMessage only stored the shell).
       const last = state.history[state.history.length - 1];
@@ -1794,6 +1805,10 @@
       // Stream ended without a done frame but we have text — keep it.
       const last = state.history[state.history.length - 1];
       if (last && last.role === "assistant") { last.content = acc; saveState(); }
+    } else {
+      // Stream closed without ever sending anything — typing is still up and
+      // no bubble exists; signal fallback so the blocking POST takes over.
+      return false;
     }
     return true;
   }

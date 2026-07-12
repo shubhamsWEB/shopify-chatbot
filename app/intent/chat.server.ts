@@ -14,6 +14,8 @@ import { recordUsage } from "./usage.server";
 import { rankByIntent } from "./ranking";
 import { similarIntentProducts } from "./vectors.server";
 import { getCustomerOrders, getOrderStatus, getReorderCards } from "./orders.server";
+import { knowledgeIndex, searchKnowledge } from "./knowledge.server";
+import { recordKnowledgeGap } from "./knowledgegaps.server";
 import type { IntentProfile } from "./events";
 
 type AdminGraphql = {
@@ -59,6 +61,12 @@ const TOOLS: Anthropic.Tool[] = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "search_knowledge",
+    description:
+      "Search THIS store's own written policies, FAQs, and current offers (returns, refunds, shipping, warranty, promotions, store info). Use this for any question about store policy, process, timelines, or a deal — NOT for product specs (use the product tools for those). Returns the merchant's exact text; ground your answer in it and never guess policy details.",
+    input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  },
+  {
     name: "add_to_cart",
     description:
       "Add a product to the shopper's cart when they ask to buy/add it. Pass productId. If the product has multiple variants (size/color) and the shopper hasn't picked one, this returns needsVariant with the options — ask which they want, then call again with variantId. quantity defaults to 1.",
@@ -97,9 +105,9 @@ const TOOLS: Anthropic.Tool[] = [
 // The volatile per-shopper context (profile, live) goes in a SEPARATE block
 // AFTER the cache breakpoint (see runChat). Never interpolate anything
 // per-session/per-turn into this string.
-const STATIC_SYSTEM = (brand: string) =>
+const STATIC_SYSTEM = (brand: string, knowledge: string) =>
   `You are a helpful in-store shopping assistant for a single Shopify store. You ONLY know and sell this store's catalog.
-${brand ? `\nABOUT THIS BRAND (merchant-provided — ground your tone, claims, and recommendations in this):\n${brand}\n` : ""}
+${brand ? `\nABOUT THIS BRAND (merchant-provided — ground your tone, claims, and recommendations in this):\n${brand}\n` : ""}${knowledge ? `\n${knowledge}\n` : ""}
 
 GROUNDING:
 - Base every product fact (price, stock, variant, attribute) on a tool result. To state facts about a product mentioned earlier in the conversation, call the tools AGAIN to get current data — don't rely on memory.
@@ -122,6 +130,10 @@ ADDING TO CART:
 
 READING THE CART:
 - "What's in my cart" / "how much is my cart" — answer directly from the CURRENT CART block below (real storefront data). No tool call needed. If it says "empty", say so plainly.
+
+STORE POLICIES, FAQs & OFFERS:
+- For any question about the store's policies, returns/refunds, shipping, warranty, timelines, or current promotions, call search_knowledge and answer from the exact text it returns. If a STORE KNOWLEDGE list appears below, it's your map of what the merchant has documented — reach for the tool whenever a question touches those topics.
+- Ground policy/offer answers strictly in the tool result. If search_knowledge returns nothing on the topic, say in one line that you don't have that detail and point them to the store's support or policy pages — never invent a return window, discount, or timeline.
 
 JUST BROWSING / EXPLORING:
 - If the shopper is clearly undecided or "just looking" and hasn't named a product or category, DON'T push one specific item. Call get_categories and invite them to pick a direction. The categories are shown as tappable options, so keep your line to one warm sentence and do NOT list a specific product.
@@ -220,17 +232,22 @@ export async function runChat(args: {
   // aggregates all their events. (Completes the deferred identity mapping.)
   const profileKey = args.customerId ?? args.sessionId;
   await ensureProfile(args.shopId, profileKey, args.sessionId).catch(() => {}); // realtime intent refresh (deterministic + inline LLM when due)
-  const [profile, session, settings] = await Promise.all([
+  const [profile, session, settings, knowledge] = await Promise.all([
     readProfile(args.shopId, profileKey).catch(() => null),
     getSession(args.shopId, args.sessionId).catch(() => null),
     getSettings(args.shopId),
+    // Tier-1 awareness index — merchant's OKF docs. Per-shop and byte-stable
+    // between doc edits (like brandDescription), so it belongs in the CACHED
+    // block: a doc edit costs one cache miss, not uncached tokens every turn.
+    // "" when the shop has no docs → the prompt is byte-identical to before.
+    knowledgeIndex(args.shopId).catch(() => ""),
   ]);
   const liveContext = session?.liveContext;
   // Prompt caching (prefix = tools → system blocks → messages): the static
-  // instructions+brand block carries the breakpoint; profile/live go in a
-  // second, uncached block so per-turn changes don't invalidate the prefix.
+  // instructions+brand+knowledge block carries the breakpoint; profile/live go
+  // in a second, uncached block so per-turn changes don't invalidate the prefix.
   const system: Anthropic.TextBlockParam[] = [
-    { type: "text", text: STATIC_SYSTEM(settings.brandDescription), cache_control: { type: "ephemeral" } },
+    { type: "text", text: STATIC_SYSTEM(settings.brandDescription, knowledge), cache_control: { type: "ephemeral" } },
     { type: "text", text: DYNAMIC_SYSTEM(profile, liveContext, args.cart) },
   ];
 
@@ -285,6 +302,19 @@ export async function runChat(args: {
       const cats = await getCategories(args.shopId);
       lastCategories = cats.map((c) => c.title);
       return cats.length ? cats : { message: "No categories configured; use search_products instead." };
+    }
+    if (name === "search_knowledge") {
+      const query = typeof input.query === "string" ? input.query : "";
+      const hits = await searchKnowledge(args.shopId, query);
+      if (!hits.length) {
+        // Zero-hit: a shopper asked something the merchant's docs don't cover.
+        // Recorded as a knowledge gap — surfaces on the merchant's Knowledge
+        // page so they can write the missing doc. Fire-and-forget, fail-soft.
+        console.log("[knowledge] zero-hit", JSON.stringify({ shop: args.shopId, query }));
+        recordKnowledgeGap(args.shopId, query).catch(() => {});
+        return { found: false, message: "No store document covers this. Tell the shopper you don't have that detail and point them to the store's support or policy pages; don't invent policy/offer specifics." };
+      }
+      return { found: true, sections: hits };
     }
     if (name === "add_to_cart") {
       const detail = await getProductDetails(args.shopId, input.productId ?? "");
