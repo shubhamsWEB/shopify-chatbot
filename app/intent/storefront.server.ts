@@ -196,13 +196,38 @@ export async function compareProducts(shop: string, productIds: string[]): Promi
   return { products: cards, attributes: ["Price", "In stock", ...attrKeys], rows, descriptions };
 }
 
-// Store's category directions for exploring shoppers — real collections, so a
-// "not sure what I want" nudge offers concrete browsing lanes, not one product.
+// Store's category directions for exploring shoppers. Real collections first —
+// but most stores never curate collections, so Shopify scaffolding ("Home
+// page", "Automated Collection", theme demo collections) is filtered out, and
+// when fewer than 2 real ones remain we fall back to productTypes. Product
+// types are also what search_products' `category` param filters on
+// (product_type:), so type-derived chips always produce matching results;
+// collection titles never did.
+const JUNK_COLLECTIONS = new Set(["frontpage", "automated-collection", "hydrogen", "all"]);
+
 export async function getCategories(shop: string, limit = 8): Promise<Array<{ title: string; handle: string }>> {
   const data = await graphql<{ collections: { nodes: Array<{ title: string; handle: string }> } }>(
     shop,
     `query($n:Int!){ collections(first:$n, sortKey:UPDATED_AT, reverse:true){ nodes { title handle } } }`,
-    { n: Math.min(Math.max(limit, 1), 20) },
+    { n: 20 },
   );
-  return (data.collections?.nodes ?? []).filter((c) => c.title && c.handle);
+  const curated = (data.collections?.nodes ?? []).filter(
+    (c) => c.title && c.handle && !JUNK_COLLECTIONS.has(c.handle.toLowerCase()),
+  );
+  if (curated.length >= 2) return curated.slice(0, limit);
+
+  // Fallback: derive categories from product types (deduped case-insensitively).
+  const types = await graphql<{ productTypes: { edges: Array<{ node: string }> } }>(
+    shop,
+    `{ productTypes(first: 50) { edges { node } } }`,
+  );
+  const seen = new Set<string>();
+  const fromTypes: Array<{ title: string; handle: string }> = [];
+  for (const { node } of types.productTypes?.edges ?? []) {
+    const t = node.trim();
+    if (!t || seen.has(t.toLowerCase())) continue;
+    seen.add(t.toLowerCase());
+    fromTypes.push({ title: t, handle: t.toLowerCase().replace(/\s+/g, "-") });
+  }
+  return [...curated, ...fromTypes].slice(0, limit);
 }

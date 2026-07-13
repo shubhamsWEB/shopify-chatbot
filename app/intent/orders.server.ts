@@ -58,12 +58,24 @@ interface RawOrder {
   lineItems?: { nodes?: Array<{ title: string; quantity: number; product?: { id?: string } }> };
 }
 
-/** Recent orders for a customer, newest first. Fail-soft → []. */
-export async function getCustomerOrders(admin: AdminGraphql, customerId: string, n = 5): Promise<OrderSummary[]> {
+/** Recent orders for a customer, newest first. Returns null when the LOOKUP
+ *  FAILED (dead token, ACCESS_DENIED, network) — callers must not present
+ *  that as "no orders". [] means the query succeeded and there are none. */
+export async function getCustomerOrders(admin: AdminGraphql, customerId: string, n = 5): Promise<OrderSummary[] | null> {
   try {
     const resp = await admin.graphql(ORDERS_QUERY, { variables: { id: gid(customerId), n: Math.min(n, 10) } });
-    const body = (await resp.json()) as { data?: { customer?: { orders?: { nodes?: RawOrder[] } } } };
-    const nodes = body.data?.customer?.orders?.nodes ?? [];
+    const body = (await resp.json()) as {
+      data?: { customer?: { orders?: { nodes?: RawOrder[] } } };
+      errors?: unknown;
+    };
+    // GraphQL-level failures come back 200 with an errors array — a dead
+    // session token or protected-customer-data denial lands here, NOT in the
+    // catch. Treat them as lookup failure, never as an empty order history.
+    if (body.errors || body.data?.customer === undefined) {
+      console.error("[orders] CustomerOrders errored:", JSON.stringify(body.errors ?? body).slice(0, 500));
+      return null;
+    }
+    const nodes = body.data.customer?.orders?.nodes ?? [];
     return nodes.map((o) => ({
       name: o.name,
       processedAt: o.processedAt,
@@ -75,16 +87,17 @@ export async function getCustomerOrders(admin: AdminGraphql, customerId: string,
     }));
   } catch (err) {
     console.error("[orders] getCustomerOrders failed:", (err as Error).message);
-    return [];
+    return null;
   }
 }
 
 const normalizeName = (s: string) => s.replace(/[^0-9]/g, "");
 
-/** One order's status — the named order, else the most recent. */
+/** One order's status — the named order, else the most recent. null = none
+ *  or lookup failed (check getCustomerOrders directly to distinguish). */
 export async function getOrderStatus(admin: AdminGraphql, customerId: string, orderName?: string): Promise<OrderSummary | null> {
   const orders = await getCustomerOrders(admin, customerId, 10);
-  if (orders.length === 0) return null;
+  if (!orders || orders.length === 0) return null;
   if (orderName) {
     const want = normalizeName(orderName);
     const hit = orders.find((o) => normalizeName(o.name) === want);

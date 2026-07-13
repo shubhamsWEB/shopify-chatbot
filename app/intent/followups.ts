@@ -10,6 +10,7 @@ const SYSTEM =
   "- Each ≤ 6 words, phrased as the SHOPPER (first person / imperative), e.g. 'Show cheaper options', 'Only waterproof ones', 'Compare these two', 'For a gift'.\n" +
   "- Each must move the conversation toward CLARIFYING the shopper's intent: budget/price, a specific attribute, use-case/occasion, brand, comparison, or category.\n" +
   "- Ground them in the assistant's last reply and the profile. No generic 'Tell me more' / 'Thanks'.\n" +
+  "- STAY IN THIS STORE'S CATALOG: the store's description and its real categories are given in the prompt. Only reference product kinds this store plausibly sells. NEVER invent a category or product kind that isn't in the reply or the given categories.\n" +
   "- Any price you mention MUST use the store's currency symbol (given in the prompt) and realistic amounts from the reply/profile — never assume dollars.\n" +
   "- Distinct from each other.";
 
@@ -23,16 +24,24 @@ export async function suggestFollowups(args: {
   profile?: IntentProfile | null;
   currency?: string;
   shop?: string;
+  /** Store grounding — brand blurb + real categories, so suggestions never
+   *  drift to product kinds the store doesn't sell. */
+  brand?: string;
+  categories?: string[];
 }): Promise<string[]> {
   const p = args.profile;
   const profileHint = p
     ? `Profile: ${p.intentNarrative}; priceCeiling=${p.priceCeiling ?? "?"}; attributes=${(p.attributePriorities ?? []).join(",")}; categories=${(p.categoriesViewed ?? []).map((c) => c.category).join(",")}; recentSearches=${(p.recentSearches ?? []).join(",")}`
     : "Profile: (none yet)";
+  const storeHint =
+    `Store: ${args.brand?.trim() || "(no description)"}\n` +
+    `Store categories: ${args.categories?.length ? args.categories.join(", ") : "(unknown — stick strictly to product kinds in the reply)"}`;
   try {
     const out = await toolCall<{ followups: string[] }>({
       model: HAIKU,
       system: SYSTEM,
       user:
+        `${storeHint}\n` +
         `Store currency: ${args.currency ?? "unknown"} (symbol: ${CURRENCY_SYMBOLS[args.currency ?? ""] ?? args.currency ?? "unknown"})\n` +
         `Shopper's last message: ${args.userMessage}\n\nAssistant replied:\n${args.assistantResponse}\n\n${profileHint}`,
       toolName: "suggest_followups",

@@ -137,6 +137,7 @@ STORE POLICIES, FAQs & OFFERS:
 
 JUST BROWSING / EXPLORING:
 - If the shopper is clearly undecided or "just looking" and hasn't named a product or category, DON'T push one specific item. Call get_categories and invite them to pick a direction. The categories are shown as tappable options, so keep your line to one warm sentence and do NOT list a specific product.
+- NEVER invent or paraphrase category names. The only categories that exist are the ones get_categories returns — don't guess alternatives from the brand description, and don't enumerate examples in your sentence (the tappable options already show them).
 
 PERSONALIZE & COMPARE:
 - Use the intent profile to personalize: price ceiling, attribute priorities, category/brand affinity, decision style.
@@ -356,6 +357,11 @@ export async function runChat(args: {
       const orderName = typeof input.orderName === "string" ? input.orderName : undefined;
       if (name === "get_my_orders") {
         const orders = await getCustomerOrders(args.admin, args.customerId, 5);
+        // null = lookup FAILED (dead token / access denied) — never tell the
+        // shopper they have no orders when we simply couldn't check.
+        if (orders === null) {
+          return { error: true, message: "Order lookup hit a temporary error — do NOT tell the shopper they have no orders. Apologize that order info is briefly unavailable and suggest trying again in a bit or checking their account page." };
+        }
         return orders.length ? orders : { message: "No orders found on this account yet." };
       }
       if (name === "track_order") {
@@ -498,7 +504,20 @@ export async function runChat(args: {
       ? []
       : lastCategories.length && products.length === 0
         ? lastCategories.slice(0, 5)
-        : await suggestFollowups({ userMessage: message, assistantResponse: response, profile, currency, shop: args.shopId });
+        : await suggestFollowups({
+            userMessage: message,
+            assistantResponse: response,
+            profile,
+            currency,
+            shop: args.shopId,
+            // Ground suggestions in THIS store: without brand+categories the
+            // model invents plausible-sounding kinds the store doesn't sell
+            // ("phone accessories" in an orthopedics store — live bug).
+            brand: settings.brandDescription,
+            categories: lastCategories.length
+              ? lastCategories
+              : await getCategories(args.shopId).then((c) => c.map((x) => x.title)).catch(() => []),
+          });
 
   return { response, products, comparison: lastComparison, followups, cartAdd };
 }
