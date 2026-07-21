@@ -83,6 +83,7 @@ export interface SearchInput {
   inStockOnly?: boolean;
   excludeProductIds?: string[];
   limit?: number;
+  sort?: "PRICE_ASC" | "PRICE_DESC"; // for "cheapest/most expensive" asks — relevance otherwise
 }
 
 // Build a Storefront search query string from structured filters.
@@ -98,15 +99,20 @@ function buildQuery(input: SearchInput): string {
 }
 
 export async function searchProducts(shop: string, input: SearchInput): Promise<ProductCard[]> {
-  // No text query (broad/"bestsellers" asks) → rank by actual sales instead of
-  // catalog order; with a query, relevance wins.
-  const sortKey = input.query?.trim() ? "RELEVANCE" : "BEST_SELLING";
+  // Explicit price sort ("cheapest X") beats everything; else no text query
+  // (broad/"bestsellers" asks) → rank by actual sales; with a query, relevance.
+  const sortKey = input.sort ? "PRICE" : input.query?.trim() ? "RELEVANCE" : "BEST_SELLING";
   const data = await graphql<{ products: { nodes: RawProduct[] } }>(
     shop,
-    `query Search($q: String, $n: Int!, $sk: ProductSortKeys!) {
-      products(first: $n, query: $q, sortKey: $sk) { nodes { ${PRODUCT_FIELDS} } }
+    `query Search($q: String, $n: Int!, $sk: ProductSortKeys!, $rev: Boolean!) {
+      products(first: $n, query: $q, sortKey: $sk, reverse: $rev) { nodes { ${PRODUCT_FIELDS} } }
     }`,
-    { q: buildQuery(input) || null, n: Math.min((input.limit ?? 6) + (input.excludeProductIds?.length ?? 0), 20), sk: sortKey },
+    {
+      q: buildQuery(input) || null,
+      n: Math.min((input.limit ?? 6) + (input.excludeProductIds?.length ?? 0), 20),
+      sk: sortKey,
+      rev: input.sort === "PRICE_DESC",
+    },
   );
   const exclude = new Set(input.excludeProductIds ?? []);
   // Gift cards fit every budget so intent ranking loves them, but they're almost

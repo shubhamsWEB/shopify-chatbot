@@ -3,6 +3,10 @@
     "shopify-dev-mcp": {
       "command": "npx",
       "args": ["-y", "@shopify/dev-mcp@latest"]
+    },
+    "lottiefiles-creator": {
+      "command": "npx",
+      "args": ["-y", "@lottiefiles/creator-mcp@latest"]
     }
   }
 }

@@ -102,8 +102,8 @@ export default function Settings() {
           <Row label="Auto-open the welcome" help="For fresh visitors, the chat opens itself with your welcome message and starter suggestions — once per visit, never over an existing conversation.">
             <Toggle k="welcomeEnabled" />
           </Row>
-          <Row label="Welcome delay (seconds)" help="How long a new visitor browses before the welcome opens. Shorter = more proactive; longer gives intent nudges the first word. 3–120s.">
-            <Num k="welcomeDelaySec" min={3} max={120} />
+          <Row label="Welcome delay (seconds)" help="How long a new visitor browses before the welcome opens. 0 = instantly on page load; longer gives intent nudges the first word. 0–120s.">
+            <Num k="welcomeDelaySec" min={0} max={120} />
           </Row>
         </s-stack>
       </s-section>

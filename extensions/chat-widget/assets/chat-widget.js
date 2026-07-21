@@ -427,7 +427,7 @@
     }
     .saleshq-product-card {
       flex-shrink: 0;
-      width: 75%;
+      width: 168px;
       background: #fff;
       border-radius: 14px;
       overflow: hidden;
@@ -911,15 +911,20 @@
 
   /* Returning visitor (same saleshq_sid cookie, new tab/day): the tab-local
      cache is empty but the server keeps the transcript — pull it back. */
-  async function loadServerHistory() {
-    if (state.history.length > 0) return; // local cache wins (fresher)
+  async function loadServerHistory(hadLocal) {
+    if (hadLocal) return; // local cache wins (fresher)
     try {
       const r = await fetch(`${API_BASE}/history?sessionId=${encodeURIComponent(SESSION_ID)}`);
       if (r.ok) {
         const d = await r.json();
         if (Array.isArray(d.messages) && d.messages.length) {
+          // The welcome already rendered instantly — swap the transcript in
+          // only if the shopper hasn't started typing/chatting meanwhile.
+          if (typedThisBoot) return;
           state.history = d.messages.slice(-50);
           saveState();
+          messagesEl.innerHTML = "";
+          restoreMessages();
         }
       }
     } catch (e) { /* ignore — worst case, fresh welcome */ }
@@ -965,13 +970,32 @@
     button.classList.add("saleshq-open");
   }
 
-  Promise.all([loadConfig(), loadServerHistory()]).finally(() => {
-    if (CFG.botEnabled === false) { shutdownWidget(); return; }
+  // Instant boot: launcher + welcome render immediately from cached/default
+  // config — no waiting on /config + /history round-trips (cold serverless
+  // made the widget appear seconds late). Fetches refine asynchronously.
+  // Runs as a microtask so every let/const below (tipsFooter, proactiveDisabled)
+  // is initialized first — a synchronous call here hits the TDZ and kills boot.
+  let typedThisBoot = false; // set on first submit; blocks late history swap-in
+  Promise.resolve().then(() => {
+    try { applyCfg(JSON.parse(sessionStorage.getItem("saleshq_cfg") || "null")); } catch (e) { /* ignore */ }
+    const hadLocalHistory = state.history.length > 0;
+    if (CFG.botEnabled === false) {
+      shutdownWidget();
+      return;
+    }
     button.style.display = "flex";
     restoreMessages();
     scheduleWelcome();
     syncTipsFooter(); // config may disable proactive → hide the opt-out link
     startProactivePolling();
+    loadConfig().then(() => {
+      if (CFG.botEnabled === false) { shutdownWidget(); return; }
+      syncTipsFooter();
+      // Re-schedule with the live delay: a first-ever visit boots on the 10s
+      // default (no cached cfg) while the merchant may have set 0 = instant.
+      scheduleWelcome();
+    });
+    loadServerHistory(hadLocalHistory);
   });
 
   /* Proactive popup (spec §7.5): on ANY page, ask the server whether to pop up.
@@ -1233,23 +1257,24 @@
      conversation get the badge only (never clobber a conversation). Skipped
      after a dismissal or once the shopper has chatted. Scheduled AFTER config
      load so the merchant's delay/enable settings apply. */
+  let welcomeTimer = null; // re-scheduled when the live config lands (delay may differ from the boot default)
   function scheduleWelcome() {
     if (!CFG.welcomeEnabled) return;
     try { if (sessionStorage.getItem("saleshq_welcomed")) return; } catch (e) { /* ignore */ }
-    const teaserMs = Math.max(2_000, CFG.welcomeDelayMs - 6_000);
-    setTimeout(() => {
-      if (state.open || proactiveDisabled || state.history.some((m) => m.role === "user")) return;
-      setBadge(1);
-      chime();
-    }, teaserMs);
-    setTimeout(() => {
+    if (welcomeTimer) clearTimeout(welcomeTimer);
+    // One moment, not a staggered teaser: badge + chime + auto-open fire
+    // together at welcomeDelayMs (0 = instantly on page load).
+    const fire = () => {
       if (state.open || proactiveDisabled) return;
       if (state.history.some((m) => m.role === "user")) return;
       try { sessionStorage.setItem("saleshq_welcomed", "1"); } catch (e) { /* ignore */ }
-      if (state.history.length > 1) return; // returning conversation → badge stays, no auto-open
+      setBadge(1);
       chime();
+      if (state.history.length > 1) return; // returning conversation → badge stays, no auto-open
       toggleChat();
-    }, CFG.welcomeDelayMs);
+    };
+    if (CFG.welcomeDelayMs <= 0) fire();
+    else welcomeTimer = setTimeout(fire, CFG.welcomeDelayMs);
   }
 
   // Keep offering help while the shopper stays on the page: re-ask the server
@@ -1402,25 +1427,26 @@
         alt="${product.title || 'Product'}"
         style="
           width: 100%;
-          height: 120px;
-          object-fit: cover;
+          height: 116px;
+          object-fit: contain;
+          background: #f7f7f7;
           ${outOfStock ? "filter: grayscale(0.6); opacity: 0.85;" : ""}
         "
       />
-      <div style="padding: 12px;">
+      <div style="padding: 8px;">
         ${badge}
-        <div style="font-weight: 600; font-size: 13px; margin-bottom: 6px; line-height: 1.3;">
+        <div style="font-weight: 600; font-size: 12px; margin-bottom: 4px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 31px;">
           ${product.title || 'Product'}
         </div>
-        <div style="font-weight: 700; font-size: 14px; margin-bottom: 10px;">
+        <div style="font-weight: 700; font-size: 13px; margin-bottom: 7px;">
           ${priceLabel}
         </div>
         <button
           class="saleshq-add-to-cart"
           style="
             width: 100%;
-            padding: 10px;
-            border-radius: 8px;
+            padding: 7px;
+            border-radius: 7px;
             border: ${outOfStock ? "1px solid #d1d5db" : "none"};
             background: ${outOfStock ? "#fff" : THEME.primary};
             color: ${outOfStock ? "#1a1a1a" : THEME.onPrimary};
@@ -1661,6 +1687,7 @@
 
     const text = input.value.trim();
     if (!text) return;
+    typedThisBoot = true; // late-arriving server history must not clobber this conversation
 
     // First reply to a proactive popup = engagement; hand off to reactive (§9.3).
     if (proactiveOpen && !state.history.some((m) => m.role === "user")) {
@@ -1683,8 +1710,10 @@
       sessionId: SESSION_ID,
       message: text,
       cart,
-      // strip client-only fields (products/followups) — server wants role+content
-      history: state.history.slice(-10).map((m) => ({ role: m.role, content: m.content }))
+      // strip client-only fields (products/followups) — server wants role+content.
+      // slice(-13, -1): the current message was already pushed by addMessage above,
+      // so drop it (it's sent as `message`) and send the 12 turns before it.
+      history: state.history.slice(-13, -1).map((m) => ({ role: m.role, content: m.content }))
     });
 
     try {

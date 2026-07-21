@@ -37,6 +37,11 @@ const TOOLS: Anthropic.Tool[] = [
         inStockOnly: { type: "boolean" },
         excludeProductIds: { type: "array", items: { type: "string" } },
         limit: { type: "number" },
+        sort: {
+          type: "string",
+          enum: ["PRICE_ASC", "PRICE_DESC"],
+          description: "Sort by price. REQUIRED for cheapest/most-expensive/budget-superlative asks; omit for normal relevance.",
+        },
       },
     },
   },
@@ -112,6 +117,7 @@ ${brand ? `\nABOUT THIS BRAND (merchant-provided — ground your tone, claims, a
 GROUNDING:
 - Base every product fact (price, stock, variant, attribute) on a tool result. To state facts about a product mentioned earlier in the conversation, call the tools AGAIN to get current data — don't rely on memory.
 - Never invent products. If a tool genuinely returns nothing for the exact ask, say so in one line.
+- search_products returns TOP MATCHES, not the whole catalog. NEVER claim "we only have N", "our only X", or "the cheapest/most expensive is Y" from an ordinary search. For cheapest/priciest asks, search with sort:"PRICE_ASC" (or PRICE_DESC). For "what X do you carry" inventory asks, search with limit 15 before summarizing the range.
 - Do NOT tell the user you fabricated or "hallucinated" data, and never apologize for products you showed earlier — those came from real tool results. If you're unsure, just re-run the tool. Never undermine the shopper's trust.
 - NEVER remark that the catalog seems inconsistent, surprising, or "not what you'd expect" from the brand — merchants stock what they stock. Present the products confidently and plainly; if results span categories, prefer the ones matching the brand description and the shopper's context.
 
@@ -278,13 +284,16 @@ export async function runChat(args: {
       if (liveContext?.lastViewedProductId) exclude.push(liveContext.lastViewedProductId);
       const cards = await searchProducts(args.shopId, { ...input, excludeProductIds: exclude });
       // Rank by the shopper's intent (price-fit, attributes, stock) so the BEST
-      // matches surface first — not just Shopify's default order.
-      lastProducts = rankByIntent(cards, {
-        priceCeiling: profile?.priceCeiling,
-        priceBand: profile?.priceBand,
-        attributePriorities: profile?.attributePriorities,
-        boostIds,
-      });
+      // matches surface first — not just Shopify's default order. An explicit
+      // price sort ("cheapest X") must survive untouched, though.
+      lastProducts = input.sort
+        ? cards
+        : rankByIntent(cards, {
+            priceCeiling: profile?.priceCeiling,
+            priceBand: profile?.priceBand,
+            attributePriorities: profile?.attributePriorities,
+            boostIds,
+          });
       remember(lastProducts);
       return lastProducts;
     }
@@ -382,8 +391,14 @@ export async function runChat(args: {
   // Cache breakpoint on the CURRENT user message: loop call 2+ (after tool
   // results) re-reads everything up to here at ~0.1x price, and the next chat
   // turn extends the same prefix. (Breakpoints used: static system + this = 2.)
+  // Old widget builds included the current message as the last history entry
+  // too (pushed to local history before slicing) — drop it so the model never
+  // sees the same user turn twice.
+  let history = args.history ?? [];
+  const last = history[history.length - 1];
+  if (last && last.role === "user" && last.content === message) history = history.slice(0, -1);
   const messages: Anthropic.MessageParam[] = [
-    ...(args.history ?? []).map((m) => ({ role: m.role, content: m.content })),
+    ...history.map((m) => ({ role: m.role, content: m.content })),
     {
       role: "user" as const,
       content: [{ type: "text" as const, text: message, cache_control: { type: "ephemeral" as const } }],
@@ -479,13 +494,38 @@ export async function runChat(args: {
     for (const c of pool.values()) {
       const title = (c.title ?? "").toLowerCase().trim();
       if (!title) continue;
-      // Match full title, or title minus a leading brand word (models often drop it).
+      // Match full title, title minus a leading brand word (models often drop
+      // it), or the title with trailing junk words dropped (test catalogs carry
+      // suffixes like "hello" that the model rightly omits in prose).
+      const candidates = [title];
+      // Brand-stripped title only when what remains is still specific — a
+      // single generic word ("insoles") false-matches half the catalog.
       const noBrand = title.replace(/^\S+\s+/, "");
-      if (hay.includes(title) || (noBrand.length > 6 && hay.includes(noBrand))) named.push(c);
+      if (noBrand.length > 6 && noBrand.includes(" ")) candidates.push(noBrand);
+      const words = title.split(/\s+/);
+      for (let n = words.length - 1; n >= Math.max(2, Math.ceil(words.length * 0.6)); n--) {
+        const prefix = words.slice(0, n).join(" ");
+        if (prefix.length > 7) candidates.push(prefix);
+      }
+      if (candidates.some((s) => hay.includes(s))) named.push(c);
     }
-    if (named.length) {
+    // Two catalog entries with the same title both match one prose mention —
+    // show one card per distinct title.
+    const seenTitle = new Set<string>();
+    const distinctNamed = named.filter((c) => {
+      const t = (c.title ?? "").toLowerCase().trim();
+      return !seenTitle.has(t) && seenTitle.add(t);
+    });
+    if (distinctNamed.length >= 2) {
+      // The reply enumerates specific products — the cards must be exactly
+      // those, in that set. Appending the rest of the search here showed
+      // shoppers cards the text never mentioned (live bug, 2026-07-19).
+      products = distinctNamed.slice(0, 8);
+    } else if (distinctNamed.length === 1) {
+      // One highlighted pick ("the Slim is the most budget-friendly") over a
+      // list intro — keep the highlight first, rest of the search behind it.
       const seen = new Set<string>();
-      products = [...named, ...lastProducts]
+      products = [...distinctNamed, ...lastProducts]
         .filter((c) => c?.productId && !seen.has(c.productId) && seen.add(c.productId))
         .slice(0, 8);
     }

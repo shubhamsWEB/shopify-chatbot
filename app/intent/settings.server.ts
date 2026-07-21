@@ -44,7 +44,7 @@ export function normalizeConfig(raw: Partial<BotConfig> | null | undefined): Bot
   return {
     proactiveEnabled: clampBool(r.proactiveEnabled, DEFAULT_CONFIG.proactiveEnabled),
     welcomeEnabled: clampBool(r.welcomeEnabled, DEFAULT_CONFIG.welcomeEnabled),
-    welcomeDelaySec: clampNum(r.welcomeDelaySec, DEFAULT_CONFIG.welcomeDelaySec, 3, 120),
+    welcomeDelaySec: clampNum(r.welcomeDelaySec, DEFAULT_CONFIG.welcomeDelaySec, 0, 120),
     idleResumeEnabled: clampBool(r.idleResumeEnabled, DEFAULT_CONFIG.idleResumeEnabled),
     idleResumeSec: clampNum(r.idleResumeSec, DEFAULT_CONFIG.idleResumeSec, 20, 600),
     maxPopupsPerSession: clampNum(r.maxPopupsPerSession, DEFAULT_CONFIG.maxPopupsPerSession, 1, 99),
