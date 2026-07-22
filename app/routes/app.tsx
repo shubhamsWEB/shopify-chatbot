@@ -35,6 +35,7 @@ export default function App() {
         <s-link href="/app/intent">Intent</s-link>
         <s-link href="/app/assistant">Assistant</s-link>
         <s-link href="/app/knowledge">Knowledge</s-link>
+        <s-link href="/app/support">Support</s-link>
         <s-link href="/app/billing">Plan & usage</s-link>
         <s-link href="/app/privacy">Compliance</s-link>
         <s-link href="/app/settings">Settings</s-link>

@@ -6,7 +6,7 @@ import { useState } from "react";
 import { useLoaderData, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { getSettings, saveSettings, normalizeConfig, DEFAULT_WELCOME, type BotConfig } from "../intent/settings.server";
+import { getSettings, saveSettings, normalizeConfig, normalizeSupportConfig, DEFAULT_WELCOME, type BotConfig, type SupportConfig } from "../intent/settings.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -18,11 +18,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const form = await request.formData();
   const config = normalizeConfig(JSON.parse(String(form.get("config") ?? "{}")));
+  const support = normalizeSupportConfig(JSON.parse(String(form.get("support") ?? "{}")));
   const existing = await getSettings(session.shop);
   await saveSettings(session.shop, {
     brandDescription: String(form.get("brandDescription") ?? ""),
     welcomeMessage: String(form.get("welcomeMessage") ?? ""),
     config,
+    support,
     backoffice: existing.backoffice, // developer-managed; merchant saves must not clear it
     shopInfo: existing.shopInfo, // synced from Shopify; merchant saves must not clear it
   });
@@ -55,11 +57,16 @@ export default function Settings() {
   const [brand, setBrand] = useState(settings.brandDescription);
   const [welcome, setWelcome] = useState(settings.welcomeMessage);
   const [cfg, setCfg] = useState<BotConfig>(settings.config);
+  const [sup, setSup] = useState<SupportConfig>(settings.support);
   const busy = fetcher.state !== "idle";
 
   const set = (k: keyof BotConfig, v: boolean | number) => setCfg((c) => ({ ...c, [k]: v }));
+  const setS = (k: keyof SupportConfig, v: boolean | string) => setSup((s) => ({ ...s, [k]: v }));
   const save = () =>
-    fetcher.submit({ brandDescription: brand, welcomeMessage: welcome, config: JSON.stringify(cfg) }, { method: "post" });
+    fetcher.submit(
+      { brandDescription: brand, welcomeMessage: welcome, config: JSON.stringify(cfg), support: JSON.stringify(sup) },
+      { method: "post" },
+    );
 
   const Toggle = ({ k }: { k: keyof BotConfig }) => (
     <input type="checkbox" checked={Boolean(cfg[k])} onChange={(e) => set(k, e.currentTarget.checked)} />
@@ -146,6 +153,40 @@ export default function Settings() {
         <s-stack direction="block" gap="small">
           <Row label="Let the assistant help with orders" help="When on, a SIGNED-IN shopper can ask the assistant to track an order, see their order history, or reorder — using only their own account data. When off, the assistant never accesses any customer or order data and will point shoppers to your account page or support instead.">
             <Toggle k="customerDataEnabled" />
+          </Row>
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Human handoff & support">
+        <s-stack direction="block" gap="small">
+          <Row label="Let shoppers ask for a human" help="When a shopper explicitly asks for a person, or the bot genuinely can't help, it notifies your team and tells the shopper someone will follow up. When off, none of this is offered.">
+            <input type="checkbox" checked={Boolean(sup.enabled)} onChange={(e) => setS("enabled", e.currentTarget.checked)} />
+          </Row>
+          <Row label="Notify email (optional)" help="Where handoff and ticket notifications go. Leave blank to use your Shopify account email.">
+            <input type="email" value={sup.notifyEmail ?? ""} placeholder="support@yourstore.com" onChange={(e) => setS("notifyEmail", e.currentTarget.value)} style={inputStyle} />
+          </Row>
+          <Row label="Generic webhook URL (optional)" help="POST a signed JSON payload of the ticket and transcript here on every handoff — wire up Zapier, Make, n8n, or your own endpoint. This is also how to reach LimeChat, which has no public API of its own.">
+            <input type="url" value={sup.webhookUrl ?? ""} placeholder="https://hooks.example.com/…" onChange={(e) => setS("webhookUrl", e.currentTarget.value)} style={inputStyle} />
+          </Row>
+          <Row label="Webhook secret (optional)" help="Signs the payload (header X-SalesHQ-Signature) so your endpoint can verify it's really from SalesHQ.">
+            <input type="text" value={sup.webhookSecret ?? ""} onChange={(e) => setS("webhookSecret", e.currentTarget.value)} style={inputStyle} />
+          </Row>
+          <Row label="WhatsApp number (optional)" help="Shoppers asking for a human get a WhatsApp link prefilled with their issue. Digits only with country code, e.g. 15551234567.">
+            <input type="text" value={sup.whatsappNumber ?? ""} placeholder="15551234567" onChange={(e) => setS("whatsappNumber", e.currentTarget.value)} style={inputStyle} />
+          </Row>
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Freshdesk (optional)">
+        <s-stack direction="block" gap="small">
+          <Row label="Connect Freshdesk" help="Creates real, trackable tickets in Freshdesk and lets the bot answer 'what's the status of my ticket'. Needs the domain and API key below.">
+            <input type="checkbox" checked={Boolean(sup.freshdeskEnabled)} onChange={(e) => setS("freshdeskEnabled", e.currentTarget.checked)} />
+          </Row>
+          <Row label="Freshdesk domain" help="Just the subdomain — 'acme' for acme.freshdesk.com.">
+            <input type="text" value={sup.freshdeskDomain ?? ""} placeholder="acme" onChange={(e) => setS("freshdeskDomain", e.currentTarget.value)} style={inputStyle} />
+          </Row>
+          <Row label="Freshdesk API key" help="From Freshdesk → Profile settings → Your API Key.">
+            <input type="password" value={sup.freshdeskApiKey ?? ""} onChange={(e) => setS("freshdeskApiKey", e.currentTarget.value)} style={inputStyle} />
           </Row>
         </s-stack>
       </s-section>

@@ -103,9 +103,37 @@ model ShopSettings {
   brandDescription String   @default("")
   welcomeMessage   String   @default("")
   config           Json     @default("{}") // BotConfig overrides (see settings.server)
+  support          Json     @default("{}") // SupportConfig: handoff channels — webhook/whatsapp/freshdesk (see settings.server)
   backoffice       Json     @default("{}") // developer-managed: plan/limits/kill switch
   shopInfo         Json     @default("{}") // synced from Shopify's Shop object (see shopinfo.server)
   updatedAt        DateTime @default(now()) @updatedAt
+}
+
+// Human-handoff notifications and CRM tickets raised from chat. One record
+// covers request_human_handoff (kind='handoff') and create_support_ticket
+// (kind='ticket') — same lifecycle/channel shape so a later live-takeover
+// feature can attach replies without a schema rewrite. Lazy-created
+// (tickets.server.ts), like KnowledgeGap.
+model SupportTicket {
+  id                 String   @id
+  shop               String
+  sessionId          String
+  customerId         String?
+  kind               String   @default("handoff")
+  channel            String   @default("none")
+  status             String   @default("open")
+  contactEmail       String?
+  contactPhone       String?
+  issueSummary       String   @default("")
+  transcriptSnapshot Json     @default("[]")
+  externalTicketId   String?
+  externalStatus     String?
+  channelMeta        Json     @default("{}")
+  createdAt          DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([shop, status])
+  @@index([shop, sessionId])
 }
 
 // Per-session chat transcript so returning visitors (same saleshq_sid cookie,

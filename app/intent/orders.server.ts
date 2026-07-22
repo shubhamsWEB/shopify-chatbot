@@ -58,6 +58,32 @@ interface RawOrder {
   lineItems?: { nodes?: Array<{ title: string; quantity: number; product?: { id?: string } }> };
 }
 
+const CUSTOMER_CONTACT_QUERY = `#graphql
+  query CustomerContact($id: ID!) {
+    customer(id: $id) { email displayName }
+  }`;
+
+/** The signed-in shopper's email/name, for prefilling a support ticket without
+ *  asking. Returns null on any failure (dead token, ACCESS_DENIED / protected
+ *  customer data) — the caller just falls back to asking the shopper. */
+export async function getCustomerContact(
+  admin: AdminGraphql,
+  customerId: string,
+): Promise<{ email?: string; displayName?: string } | null> {
+  try {
+    const resp = await admin.graphql(CUSTOMER_CONTACT_QUERY, { variables: { id: gid(customerId) } });
+    const body = (await resp.json()) as {
+      data?: { customer?: { email?: string | null; displayName?: string | null } | null };
+      errors?: unknown;
+    };
+    if (body.errors || !body.data?.customer) return null;
+    return { email: body.data.customer.email ?? undefined, displayName: body.data.customer.displayName ?? undefined };
+  } catch (err) {
+    console.error("[orders] getCustomerContact failed:", (err as Error).message);
+    return null;
+  }
+}
+
 /** Recent orders for a customer, newest first. Returns null when the LOOKUP
  *  FAILED (dead token, ACCESS_DENIED, network) — callers must not present
  *  that as "no orders". [] means the query succeeded and there are none. */

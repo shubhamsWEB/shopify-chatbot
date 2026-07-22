@@ -13,9 +13,15 @@ import { getSettings } from "./settings.server";
 import { recordUsage } from "./usage.server";
 import { rankByIntent } from "./ranking";
 import { similarIntentProducts } from "./vectors.server";
-import { getCustomerOrders, getOrderStatus, getReorderCards } from "./orders.server";
+import { getCustomerOrders, getOrderStatus, getReorderCards, getCustomerContact } from "./orders.server";
 import { knowledgeIndex, searchKnowledge } from "./knowledge.server";
 import { recordKnowledgeGap } from "./knowledgegaps.server";
+import { getTranscript } from "./transcript.server";
+import {
+  createSupportCase, findSupportCase, findMostRecentForSession,
+  dispatchHandoffNotifications, openTicketOnChannel, updateSupportCaseExternalStatus,
+} from "./tickets.server";
+import type { TicketChannel, TicketStatus } from "./tickets.server";
 import type { IntentProfile } from "./events";
 
 type AdminGraphql = {
@@ -105,12 +111,53 @@ const TOOLS: Anthropic.Tool[] = [
   },
 ];
 
+// Human-handoff / support tools — appended to TOOLS only when the shop enabled
+// support (see runChat). Kept separate so the master switch can omit them
+// cleanly (and so the base TOOLS prompt-cache prefix is unchanged for shops
+// that leave support off).
+const HANDOFF_TOOLS: Anthropic.Tool[] = [
+  {
+    name: "request_human_handoff",
+    description:
+      "Notify the store's team that this shopper wants (or needs) a human, and hand off the FULL conversation for follow-up. Use when the shopper explicitly asks for a person/agent/human, or when you genuinely can't resolve their issue after a real attempt — not for any question you're merely unsure of. This does NOT get a reply back in this chat; it's an async notification. If you don't already know their email or phone from this conversation, ask ONE short question for it before calling this.",
+    input_schema: {
+      type: "object",
+      properties: {
+        issueSummary: { type: "string", description: "One or two sentence summary of what the shopper needs help with." },
+        contactEmail: { type: "string" },
+        contactPhone: { type: "string" },
+      },
+      required: ["issueSummary"],
+    },
+  },
+  {
+    name: "create_support_ticket",
+    description:
+      "Open a trackable support ticket in the store's connected helpdesk — distinct from a quick heads-up. Use when the issue should be tracked as its own case the shopper can ask you about later. Returns a ticket reference. Ask for contact email if not already known.",
+    input_schema: {
+      type: "object",
+      properties: {
+        issueSummary: { type: "string" },
+        contactEmail: { type: "string" },
+        contactPhone: { type: "string" },
+      },
+      required: ["issueSummary"],
+    },
+  },
+  {
+    name: "check_ticket_status",
+    description:
+      "Look up the current status of a support ticket created earlier in this conversation via create_support_ticket. Pass the ticket reference the shopper was given, or omit to check the most recent one from this session.",
+    input_schema: { type: "object", properties: { ticketId: { type: "string" } } },
+  },
+];
+
 // STATIC system block: instructions + brand only — byte-stable across a shop's
 // requests so the prompt-cache prefix (tools → this block) survives every turn.
 // The volatile per-shopper context (profile, live) goes in a SEPARATE block
 // AFTER the cache breakpoint (see runChat). Never interpolate anything
 // per-session/per-turn into this string.
-const STATIC_SYSTEM = (brand: string, knowledge: string) =>
+const STATIC_SYSTEM = (brand: string, knowledge: string, supportEnabled: boolean) =>
   `You are a helpful in-store shopping assistant for a single Shopify store. You ONLY know and sell this store's catalog.
 ${brand ? `\nABOUT THIS BRAND (merchant-provided — ground your tone, claims, and recommendations in this):\n${brand}\n` : ""}${knowledge ? `\n${knowledge}\n` : ""}
 
@@ -154,7 +201,15 @@ ORDERS & ACCOUNT HELP:
 - These only work when the shopper is logged in. If a tool returns needsLogin, tell them in ONE friendly line to sign into their account to see their orders — then continue helping with shopping.
 - When you track an order, give the plain status (e.g. "Shipped — arriving soon") and, if a tracking number or link is present, share it. Never invent a tracking number or delivery date; only state what the tool returned.
 - reorder returns product CARDS (rendered below your message) — introduce them in one line ("Here's what you ordered last time:") and don't re-list them in prose. You cannot cancel, refund, or change orders — for those, point the shopper to the order-status page or the store's support.
-
+${supportEnabled ? `
+HUMAN HANDOFF & SUPPORT TICKETS:
+- If the shopper explicitly asks for a human/agent, or you've made a real attempt and genuinely can't help, offer to loop in the team.
+- Ask AT MOST ONE short question for contact info (email or phone), and only if you don't already have it. Never re-ask something already given.
+- Use request_human_handoff for a simple "someone will follow up" case. Use create_support_ticket when the issue needs a trackable reference the shopper can ask about later.
+- This is ASYNC: never say a human is here now or will reply in this chat. Say the team will reach out by email or phone (or WhatsApp, if a link comes back).
+- If a WhatsApp continuation link is returned, mention it in one line. Don't repeat the number in prose, the button already shows it.
+- check_ticket_status: report only what the tool returns. If it says there's no live status for that channel, say so plainly and don't guess a status.
+` : ""}
 TONE — talk like a warm, real human shop associate, not a bot:
 - Write the way a friendly person actually talks. Use contractions (you'll, it's, I've, here's) and natural, everyday words.
 - DO NOT use em-dashes or en-dashes ("—", "–") at all. They read as robotic. Use a comma, a period, "so", "and", or just two short sentences instead. Never join clauses with a dash.
@@ -203,12 +258,24 @@ export interface CartAdd {
   currency?: string;
 }
 
+// Server-driven client action: the widget renders a handoff/ticket confirmation
+// card (and an optional WhatsApp continuation button) — threaded through exactly
+// like cartAdd.
+export interface SupportAction {
+  kind: "handoff" | "ticket";
+  ticketId: string; // internal tk_… id, or the CRM's own reference when it gives one
+  status: TicketStatus;
+  channel: TicketChannel;
+  whatsappLink?: string;
+}
+
 export interface ChatResult {
   response: string;
   products: ProductCard[];
   comparison?: ComparisonMatrix;
   followups?: string[];
   cartAdd?: CartAdd; // present when the bot added something to the cart this turn
+  support?: SupportAction; // present when the bot raised a handoff/ticket this turn
 }
 
 // Proactive trigger → an internal user message (spec §7.5). The widget pops up
@@ -254,7 +321,7 @@ export async function runChat(args: {
   // instructions+brand+knowledge block carries the breakpoint; profile/live go
   // in a second, uncached block so per-turn changes don't invalidate the prefix.
   const system: Anthropic.TextBlockParam[] = [
-    { type: "text", text: STATIC_SYSTEM(settings.brandDescription, knowledge), cache_control: { type: "ephemeral" } },
+    { type: "text", text: STATIC_SYSTEM(settings.brandDescription, knowledge, settings.support.enabled), cache_control: { type: "ephemeral" } },
     { type: "text", text: DYNAMIC_SYSTEM(profile, liveContext, args.cart) },
   ];
 
@@ -267,11 +334,30 @@ export async function runChat(args: {
   let lastComparison: ComparisonMatrix | undefined;
   let lastCategories: string[] = []; // exploring nudge: offer these as tappable directions
   let cartAdd: CartAdd | undefined;   // add_to_cart action the widget executes
+  let supportAction: SupportAction | undefined; // handoff/ticket card the widget renders
   // Every product surfaced by any tool call this turn — used to reconcile the
   // cards with the products the model actually NAMES in its final reply, so the
   // shopper never sees cards that don't match the text.
   const pool = new Map<string, ProductCard>();
   const remember = (cards: ProductCard[]) => cards.forEach((c) => { if (c?.productId) pool.set(c.productId, c); });
+
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const PHONE_RE = /^[+]?[\d\s().-]{7,}$/;
+  // Resolve shopper contact for a handoff/ticket: prefer what the model
+  // extracted from chat, else the logged-in customer's own email (silent), else
+  // nothing (the tool result nudges the model to ask).
+  async function resolveContact(input: Record<string, unknown>): Promise<{ email?: string; phone?: string }> {
+    const rawEmail = typeof input.contactEmail === "string" ? input.contactEmail.trim() : "";
+    const rawPhone = typeof input.contactPhone === "string" ? input.contactPhone.trim() : "";
+    const out: { email?: string; phone?: string } = {};
+    if (rawEmail && EMAIL_RE.test(rawEmail)) out.email = rawEmail;
+    if (rawPhone && PHONE_RE.test(rawPhone)) out.phone = rawPhone;
+    if (!out.email && args.customerId && args.admin) {
+      const c = await getCustomerContact(args.admin, args.customerId).catch(() => null);
+      if (c?.email && EMAIL_RE.test(c.email)) out.email = c.email;
+    }
+    return out;
+  }
 
   async function execTool(name: string, rawInput: unknown): Promise<unknown> {
     const input = rawInput as {
@@ -385,6 +471,72 @@ export async function runChat(args: {
       }
       return cards.length ? cards : { message: "Couldn't find items to reorder from that order." };
     }
+    // Human handoff / support tickets. Only reachable when settings.support.enabled
+    // (the tools are omitted otherwise), so no per-branch enable check needed.
+    if (name === "request_human_handoff") {
+      const issueSummary = String(input.issueSummary ?? "").trim();
+      const contact = await resolveContact(input);
+      const snapshot = [...(await getTranscript(args.shopId, args.sessionId).catch(() => [])), { role: "user" as const, content: message }];
+      const ticket = await createSupportCase(args.shopId, {
+        sessionId: args.sessionId, customerId: args.customerId, kind: "handoff",
+        issueSummary, contactEmail: contact.email, contactPhone: contact.phone, transcriptSnapshot: snapshot,
+      });
+      const dispatch = await dispatchHandoffNotifications(args.shopId, ticket, settings.support);
+      supportAction = {
+        kind: "handoff", ticketId: ticket.id,
+        status: dispatch.notified ? "notified" : "open", channel: dispatch.channel, whatsappLink: dispatch.whatsappLink,
+      };
+      return {
+        ok: true, ticketId: ticket.id, notified: dispatch.notified, whatsappLink: dispatch.whatsappLink,
+        message: dispatch.notified
+          ? "Team notified. Tell the shopper someone will follow up by email or phone (or WhatsApp if a link is shown). Do NOT claim a human is here now."
+          : "Recorded, but no notification channel is configured. Tell the shopper the team will follow up, and don't promise a timeline.",
+      };
+    }
+    if (name === "create_support_ticket") {
+      const issueSummary = String(input.issueSummary ?? "").trim();
+      const contact = await resolveContact(input);
+      const support = settings.support;
+      const channel: TicketChannel =
+        support.freshdeskEnabled && support.freshdeskDomain && support.freshdeskApiKey ? "freshdesk"
+          : support.webhookUrl ? "webhook" : "email";
+      const result = await openTicketOnChannel(args.shopId, channel, support, { issueSummary, contactEmail: contact.email, contactPhone: contact.phone });
+      const snapshot = [...(await getTranscript(args.shopId, args.sessionId).catch(() => [])), { role: "user" as const, content: message }];
+      const ticket = await createSupportCase(args.shopId, {
+        sessionId: args.sessionId, customerId: args.customerId, kind: "ticket", channel,
+        contactEmail: contact.email, contactPhone: contact.phone, issueSummary, transcriptSnapshot: snapshot,
+        externalTicketId: result.externalId, externalStatus: result.externalStatus,
+        status: result.ok ? "notified" : "open", channelMeta: result.meta,
+      });
+      const ref = result.externalId ?? ticket.id;
+      supportAction = { kind: "ticket", ticketId: ref, status: ticket.status, channel };
+      return {
+        ok: result.ok, ticketId: ref, channel,
+        message: result.ok
+          ? `Ticket opened (reference ${ref}). Give the shopper this reference and say the team will be in touch.`
+          : "Couldn't reach the helpdesk right now, but the request is saved. Tell the shopper the team will follow up.",
+      };
+    }
+    if (name === "check_ticket_status") {
+      const ticket = typeof input.ticketId === "string"
+        ? await findSupportCase(args.shopId, input.ticketId, args.sessionId, args.customerId)
+        : await findMostRecentForSession(args.shopId, args.sessionId, args.customerId);
+      if (!ticket) return { found: false, message: "No matching ticket for this conversation. Ask the shopper for the reference they were given." };
+      if (ticket.channel === "freshdesk" && ticket.externalTicketId) {
+        try {
+          const { getFreshdeskTicketStatus } = await import("./connectors/freshdesk.server");
+          const fresh = await getFreshdeskTicketStatus(settings.support, ticket.externalTicketId);
+          if (fresh?.status) await updateSupportCaseExternalStatus(args.shopId, ticket.id, fresh.status).catch(() => {});
+          return { found: true, ticketId: ticket.externalTicketId, status: fresh?.status ?? ticket.externalStatus ?? ticket.status };
+        } catch {
+          return { found: true, ticketId: ticket.externalTicketId, status: ticket.externalStatus ?? ticket.status, message: "Couldn't refresh live status; this is the last recorded one." };
+        }
+      }
+      return {
+        found: true, ticketId: ticket.externalTicketId ?? ticket.id, status: ticket.status,
+        message: "This channel doesn't provide live status updates, so this is our last recorded status. Say so plainly and don't guess a newer status.",
+      };
+    }
     throw new Error(`unknown tool ${name}`);
   }
 
@@ -426,6 +578,10 @@ export async function runChat(args: {
   // reliable tool selection, not just composition.
   const looksLikeCartIntent = /\b(add|buy|purchase|order|get me)\b.*\b(cart|this|it|that)\b/i.test(args.message ?? "");
   let composing = WORKER === CHAT_MODEL || looksLikeCartIntent;
+  // Handoff tools only when the shop enabled support. Computed once per turn:
+  // flipping the setting invalidates this shop's prompt-cache prefix for one
+  // request (acceptable, one-time), not per-turn.
+  const tools = settings.support.enabled ? [...TOOLS, ...HANDOFF_TOOLS] : TOOLS;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const model = composing ? CHAT_MODEL : WORKER;
     // Only the final Sonnet compose streams to the shopper; worker turns are
@@ -434,11 +590,11 @@ export async function runChat(args: {
     const streamThis = !!args.stream && composing;
     let res: Anthropic.Message;
     if (streamThis) {
-      const s = client.messages.stream({ model, max_tokens: 1024, system, tools: TOOLS, messages });
+      const s = client.messages.stream({ model, max_tokens: 1024, system, tools, messages });
       s.on("text", (t) => args.stream!.onText(t));
       res = await s.finalMessage();
     } else {
-      res = await client.messages.create({ model, max_tokens: 1024, system, tools: TOOLS, messages });
+      res = await client.messages.create({ model, max_tokens: 1024, system, tools, messages });
     }
     recordUsage(args.shopId, model, res.usage);
     content = res.content;
@@ -559,5 +715,5 @@ export async function runChat(args: {
               : await getCategories(args.shopId).then((c) => c.map((x) => x.title)).catch(() => []),
           });
 
-  return { response, products, comparison: lastComparison, followups, cartAdd };
+  return { response, products, comparison: lastComparison, followups, cartAdd, support: supportAction };
 }

@@ -38,6 +38,10 @@ const clampNum = (v: unknown, d: number, min: number, max: number) => {
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d;
 };
 const clampBool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
+const clampStr = (v: unknown, max: number): string | undefined => {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s ? s.slice(0, max) : undefined;
+};
 
 export function normalizeConfig(raw: Partial<BotConfig> | null | undefined): BotConfig {
   const r = raw ?? {};
@@ -53,6 +57,42 @@ export function normalizeConfig(raw: Partial<BotConfig> | null | undefined): Bot
     soundEnabled: clampBool(r.soundEnabled, DEFAULT_CONFIG.soundEnabled),
     badgeEnabled: clampBool(r.badgeEnabled, DEFAULT_CONFIG.badgeEnabled),
     customerDataEnabled: clampBool(r.customerDataEnabled, DEFAULT_CONFIG.customerDataEnabled),
+  };
+}
+
+// Human-handoff / support-channel config. Merchant-editable (like `config`),
+// NOT developer-only (`backoffice`). String secrets live in this JSONB blob at
+// the same trust boundary as `contactEmail` — typed into the merchant's own app
+// admin over HTTPS. normalizeConfig only does bool/number, so this shape is
+// normalized separately (normalizeSupportConfig).
+export interface SupportConfig {
+  enabled: boolean;          // master switch — omits the 3 handoff tools from TOOLS when false
+  notifyEmail?: string;      // overrides recipientFor() for handoff/ticket notifications
+  webhookUrl?: string;       // generic outgoing webhook (Zapier/Make/n8n/LimeChat bridge)
+  webhookSecret?: string;    // HMAC key for X-SalesHQ-Signature
+  whatsappNumber?: string;   // digits only, E.164 without '+', e.g. "15551234567"
+  freshdeskEnabled: boolean; // Phase 2 — real two-way CRM adapter
+  freshdeskDomain?: string;  // subdomain only, e.g. "acme" for acme.freshdesk.com
+  freshdeskApiKey?: string;
+}
+
+export const DEFAULT_SUPPORT_CONFIG: SupportConfig = { enabled: true, freshdeskEnabled: false };
+
+export function normalizeSupportConfig(raw: Partial<SupportConfig> | null | undefined): SupportConfig {
+  const r = raw ?? {};
+  const webhookUrl = clampStr(r.webhookUrl, 500);
+  return {
+    enabled: clampBool(r.enabled, DEFAULT_SUPPORT_CONFIG.enabled),
+    notifyEmail: clampStr(r.notifyEmail, 200),
+    webhookUrl: webhookUrl && /^https?:\/\//i.test(webhookUrl) ? webhookUrl : undefined,
+    webhookSecret: clampStr(r.webhookSecret, 200),
+    whatsappNumber: clampStr(r.whatsappNumber, 20)?.replace(/[^\d]/g, "") || undefined,
+    freshdeskEnabled: clampBool(r.freshdeskEnabled, DEFAULT_SUPPORT_CONFIG.freshdeskEnabled),
+    freshdeskDomain: clampStr(r.freshdeskDomain, 100)
+      ?.replace(/^https?:\/\//i, "")
+      .replace(/\.freshdesk\.com.*$/i, "")
+      .replace(/\/+$/, "") || undefined,
+    freshdeskApiKey: clampStr(r.freshdeskApiKey, 200),
   };
 }
 
@@ -85,6 +125,7 @@ export interface ShopSettings {
   brandDescription: string;
   welcomeMessage: string;
   config: BotConfig;
+  support: SupportConfig;
   backoffice: BackofficeMeta;
   shopInfo: ShopInfo;
 }
@@ -96,7 +137,7 @@ export const DEFAULT_WELCOME =
   "- **Recommend picks** personalized to what you're browsing\n" +
   "- **Answer questions** on details, sizing, and stock\n\n" +
   "What are you looking for today?";
-const EMPTY: ShopSettings = { brandDescription: "", welcomeMessage: "", config: DEFAULT_CONFIG, backoffice: {}, shopInfo: {} };
+const EMPTY: ShopSettings = { brandDescription: "", welcomeMessage: "", config: DEFAULT_CONFIG, support: DEFAULT_SUPPORT_CONFIG, backoffice: {}, shopInfo: {} };
 
 let tableReady: Promise<void> | null = null;
 function ensureTable(): Promise<void> {
@@ -125,6 +166,11 @@ function ensureTable(): Promise<void> {
     .then(() =>
       prisma.$executeRawUnsafe(
         `ALTER TABLE "ShopSettings" ADD COLUMN IF NOT EXISTS "shopInfo" JSONB NOT NULL DEFAULT '{}'`,
+      ),
+    )
+    .then(() =>
+      prisma.$executeRawUnsafe(
+        `ALTER TABLE "ShopSettings" ADD COLUMN IF NOT EXISTS "support" JSONB NOT NULL DEFAULT '{}'`,
       ),
     )
     .then(() => undefined)
@@ -160,6 +206,7 @@ export async function getSettings(shop: string): Promise<ShopSettings> {
           brandDescription: row.brandDescription,
           welcomeMessage: row.welcomeMessage,
           config: normalizeConfig(row.config as Partial<BotConfig>),
+          support: normalizeSupportConfig((row as { support?: unknown }).support as Partial<SupportConfig>),
           backoffice: ((row as { backoffice?: unknown }).backoffice as BackofficeMeta) ?? {},
           shopInfo: ((row as { shopInfo?: unknown }).shopInfo as ShopInfo) ?? {},
         }
@@ -189,12 +236,13 @@ export async function saveSettings(shop: string, s: ShopSettings): Promise<void>
   const brandDescription = s.brandDescription.trim().slice(0, 2000);
   const welcomeMessage = s.welcomeMessage.trim().slice(0, 500);
   const config = normalizeConfig(s.config);
+  const support = normalizeSupportConfig(s.support);
   await prisma.shopSettings.upsert({
     where: { shop },
-    create: { shop, brandDescription, welcomeMessage, config: config as unknown as object, backoffice: s.backoffice as unknown as object, shopInfo: s.shopInfo as unknown as object },
-    update: { brandDescription, welcomeMessage, config: config as unknown as object },
+    create: { shop, brandDescription, welcomeMessage, config: config as unknown as object, support: support as unknown as object, backoffice: s.backoffice as unknown as object, shopInfo: s.shopInfo as unknown as object },
+    update: { brandDescription, welcomeMessage, config: config as unknown as object, support: support as unknown as object },
   });
-  cache.set(shop, { v: { brandDescription, welcomeMessage, config, backoffice: s.backoffice ?? {}, shopInfo: s.shopInfo ?? {} }, at: Date.now() });
+  cache.set(shop, { v: { brandDescription, welcomeMessage, config, support, backoffice: s.backoffice ?? {}, shopInfo: s.shopInfo ?? {} }, at: Date.now() });
 }
 
 /** Developer-only: update the backoffice controls without touching merchant fields. */

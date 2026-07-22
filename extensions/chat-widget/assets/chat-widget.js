@@ -1633,6 +1633,35 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  /* Server-driven handoff/ticket confirmation card (same pattern as
+     performCartAdd): the server raised the case; we just render the receipt and,
+     if the merchant configured WhatsApp, a button to continue there. */
+  function renderSupportCard(support) {
+    if (!support) return;
+    const card = document.createElement("div");
+    card.className = "saleshq-support-card saleshq-msg-enter";
+    const title = support.kind === "ticket" ? "Support ticket created" : "We've notified our team";
+    const box = document.createElement("div");
+    box.style.cssText = "padding:10px 12px;border-radius:10px;background:#f7f7f7;border:1px solid #eef0f2;margin-bottom:14px;";
+    box.innerHTML =
+      '<div style="font-weight:600;font-size:13px;color:#1a1a1a;">' + title + "</div>" +
+      (support.ticketId
+        ? '<div style="font-size:12px;color:#666;margin-top:2px;">Reference: ' + String(support.ticketId).replace(/[<>&]/g, "") + "</div>"
+        : "");
+    if (support.whatsappLink) {
+      const btn = document.createElement("a");
+      btn.href = support.whatsappLink;
+      btn.target = "_blank";
+      btn.rel = "noopener";
+      btn.textContent = "Continue on WhatsApp";
+      btn.style.cssText = "display:inline-block;margin-top:8px;padding:8px 12px;border-radius:8px;background:#25D366;color:#fff;font-size:12px;font-weight:600;text-decoration:none;";
+      box.appendChild(btn);
+    }
+    card.appendChild(box);
+    messagesEl.appendChild(card);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
   function showTypingIndicator() {
     const typing = document.createElement("div");
     typing.id = "saleshq-typing";
@@ -1735,6 +1764,7 @@
       }
       addMessage("assistant", data.response, { products: data.products || [], followups: data.followups || [] });
       if (data.cartAdd) performCartAdd(data.cartAdd);
+      if (data.support) renderSupportCard(data.support);
       if (data.products && data.products.length) renderProductCarousel(data.products);
       if (data.followups && data.followups.length) renderFollowups(data.followups);
     } catch (err) {
@@ -1827,6 +1857,7 @@
       }
       if (!done.serviceStopped) {
         if (done.cartAdd) performCartAdd(done.cartAdd);
+        if (done.support) renderSupportCard(done.support);
         if (done.products && done.products.length) renderProductCarousel(done.products);
         if (done.followups && done.followups.length) renderFollowups(done.followups);
       }
