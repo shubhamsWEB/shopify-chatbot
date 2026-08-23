@@ -44,6 +44,12 @@ api_version = "2026-04"
   topics = [ "app_purchases_one_time/update" ]
   uri = "/webhooks/purchases"
 
+  # Billing truth on subscription changes (approve/cancel/expire) — syncs
+  # plan/caps/status immediately instead of waiting for an admin page load.
+  [[webhooks.subscriptions]]
+  topics = [ "app_subscriptions/update" ]
+  uri = "/webhooks/app_subscriptions/update"
+
 # Widget + pixel call the app through the App Proxy so Shopify HMAC-signs every
 # request with the real shop — shopId can't be spoofed and there's no CORS.
 # Storefront path: https://{shop}/apps/saleshq/* → {application_url}/proxy/*

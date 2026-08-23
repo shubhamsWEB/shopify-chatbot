@@ -4,7 +4,7 @@
 import { getBackofficeMeta, saveBackoffice } from "./settings.server";
 import { monthlyReplies } from "./transcript.server";
 import { monthlyCostUsd } from "./usage.server";
-import { trialExpired } from "./billing.server";
+import { trialExpired, freshBackofficeMeta } from "./billing.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -24,7 +24,7 @@ export async function assertBotOperational(
   shop: string,
   opts?: { cors?: boolean },
 ): Promise<Response | null> {
-  const backoffice = await getBackofficeMeta(shop);
+  const backoffice = await freshBackofficeMeta(shop);
   if (backoffice.botEnabled === false || trialExpired(backoffice)) {
     return Response.json(serviceStoppedBody(), { status: 503, headers: opts?.cors ? CORS : undefined });
   }

@@ -297,6 +297,8 @@
   const SIDE = CONFIG.position === "left" ? "left" : "right";
 
   /* Inject CSS animations and styles */
+  const _brandRgbCss = colorToRgb(THEME.primary) || { r: 26, g: 26, b: 26 };
+  const brandTintBg = `rgba(${_brandRgbCss.r},${_brandRgbCss.g},${_brandRgbCss.b},0.1)`;
   const styleSheet = document.createElement("style");
   styleSheet.textContent = `
     @keyframes saleshq-fade-in {
@@ -602,6 +604,80 @@
       background: #e0e0e0;
       color: #1a1a1a;
     }
+    /* Quick actions: what the assistant can DO beyond chat (find, track,
+       offers, bestsellers). Shown on new conversations + via the ⚡ menu. */
+    .saleshq-qa-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .saleshq-qa-card {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 12px;
+      background: #fff;
+      border: 1px solid #eef0f2;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #1f2937;
+      cursor: pointer;
+      text-align: left;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+    .saleshq-qa-card:hover {
+      border-color: ${THEME.primary};
+      transform: translateY(-1px);
+      box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+    }
+    .saleshq-qa-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: ${brandTintBg};
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex: 0 0 auto;
+    }
+    .saleshq-menu-btn {
+      width: 44px;
+      height: 44px;
+      border: 1px solid #e5e7eb;
+      background: #f7f8fa;
+      color: #6b7280;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .saleshq-menu-btn:hover {
+      border-color: ${THEME.primary};
+      color: ${THEME.primary};
+      background: #fff;
+    }
+    .saleshq-status-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #4ade80;
+      margin-right: 5px;
+      box-shadow: 0 0 0 2px rgba(74,222,128,0.3);
+      animation: saleshq-online 2.4s ease-in-out infinite;
+    }
+    @keyframes saleshq-online {
+      0%, 100% { box-shadow: 0 0 0 2px rgba(74,222,128,0.3); }
+      50% { box-shadow: 0 0 0 4px rgba(74,222,128,0.12); }
+    }
   `;
   document.head.appendChild(styleSheet);
 
@@ -708,7 +784,7 @@
   chat.innerHTML = `
     <div class="saleshq-head" style="
       padding: 16px 18px;
-      background: ${THEME.primary};
+      background: linear-gradient(135deg, ${THEME.primary}, ${THEME.primaryHover});
       color: ${THEME.onPrimary};
       display: flex;
       align-items: center;
@@ -726,16 +802,8 @@
       ">${chatIconSvg.replace('width="26" height="26"', 'width="18" height="18"')}</span>
       <div style="flex: 1; min-width: 0;">
         <div style="font-weight: 700; font-size: 15px; letter-spacing: -0.2px;">${HEADER_TITLE}</div>
-        <div style="font-size: 12px; opacity: 0.85; margin-top: 1px;">${HEADER_SUBTITLE}</div>
+        <div style="font-size: 12px; opacity: 0.85; margin-top: 1px;"><span class="saleshq-status-dot"></span>${HEADER_SUBTITLE}</div>
       </div>
-      <span style="
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #4ade80;
-        box-shadow: 0 0 0 3px rgba(74,222,128,0.25);
-        flex: 0 0 auto;
-      "></span>
       <button id="saleshq-close" class="saleshq-close-btn" style="
         width: 32px;
         height: 32px;
@@ -783,6 +851,9 @@
       background: #fff;
       border-top: 1px solid #eef0f2;
     ">
+      <button type="button" id="saleshq-menu" class="saleshq-menu-btn" title="Quick actions" aria-label="Quick actions">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      </button>
       <input
         id="saleshq-input"
         class="saleshq-input"
@@ -873,6 +944,10 @@
 
   closeBtn.onclick = toggleChat;
 
+  // ⚡ menu: toggle the quick-action cards at the bottom of the transcript.
+  const menuBtn = chat.querySelector("#saleshq-menu");
+  if (menuBtn) menuBtn.onclick = renderQuickActions;
+
   /* Merchant configuration (admin → Bot settings): welcome copy + behavior
      knobs. Cached per session so only the first page pays the round-trip.
      Defaults reproduce shipped behavior when the fetch fails. */
@@ -900,11 +975,12 @@
       if (r.ok) {
         const c = await r.json();
         applyCfg(c);
-        if (c.botEnabled !== false) {
-          try { sessionStorage.setItem("saleshq_cfg", JSON.stringify(c)); } catch (e) { /* ignore */ }
-        } else {
-          try { sessionStorage.removeItem("saleshq_cfg"); } catch (e) { /* ignore */ }
-        }
+        // Cache the verdict either way: a DISABLED shop must remember it too,
+        // or every page boots on defaults, flashes the launcher, then yanks it
+        // when this fetch lands ("widget appears and hides" bug). The boot path
+        // re-checks config on a cached-disabled session, so re-enabling still
+        // takes effect without a fresh session.
+        try { sessionStorage.setItem("saleshq_cfg", JSON.stringify(c)); } catch (e) { /* ignore */ }
       }
     } catch (e) { /* ignore — defaults keep widget usable until next page */ }
   }
@@ -951,15 +1027,13 @@
         }
       });
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      // Restored session where the shopper never chatted (welcome only):
+      // re-offer the quick-action cards.
+      if (!state.history.some((m) => m.role === "user")) renderQuickActions();
     } else {
-      // Show welcome message + intent-revealing starter CTAs for new conversations
-      const starters = [
-        "Help me find something",
-        "Show your bestsellers",
-        "I'm shopping for a gift"
-      ];
-      addMessage("assistant", WELCOME, { followups: starters });
-      renderFollowups(starters);
+      // New conversation: welcome + the assistant's capabilities as tappable cards.
+      addMessage("assistant", WELCOME);
+      renderQuickActions();
     }
   }
 
@@ -979,15 +1053,24 @@
   Promise.resolve().then(() => {
     try { applyCfg(JSON.parse(sessionStorage.getItem("saleshq_cfg") || "null")); } catch (e) { /* ignore */ }
     const hadLocalHistory = state.history.length > 0;
+    const bootUI = () => {
+      button.style.display = "flex";
+      restoreMessages();
+      scheduleWelcome();
+      syncTipsFooter(); // config may disable proactive → hide the opt-out link
+      startProactivePolling();
+      loadServerHistory(hadLocalHistory);
+    };
     if (CFG.botEnabled === false) {
-      shutdownWidget();
+      // Session cache says disabled: stay hidden (no launcher flash), but
+      // re-check live config so a re-enabled bot comes back mid-session.
+      loadConfig().then(() => {
+        if (CFG.botEnabled === false) shutdownWidget();
+        else bootUI();
+      });
       return;
     }
-    button.style.display = "flex";
-    restoreMessages();
-    scheduleWelcome();
-    syncTipsFooter(); // config may disable proactive → hide the opt-out link
-    startProactivePolling();
+    bootUI();
     loadConfig().then(() => {
       if (CFG.botEnabled === false) { shutdownWidget(); return; }
       syncTipsFooter();
@@ -995,7 +1078,6 @@
       // default (no cached cfg) while the merchant may have set 0 = instant.
       scheduleWelcome();
     });
-    loadServerHistory(hadLocalHistory);
   });
 
   /* Proactive popup (spec §7.5): on ANY page, ask the server whether to pop up.
@@ -1601,6 +1683,36 @@
     } catch (err) {
       addMessage("assistant", `Sorry, that didn't actually make it into your cart. Try the "Add to Cart" button on the card instead.`);
     }
+  }
+
+  /* Quick actions — the assistant's capabilities as tappable cards (search,
+     bestsellers, order tracking, offers/policies). Each just sends a preset
+     message; the server's tools do the rest, so this needs zero backend. */
+  const QUICK_ACTIONS = [
+    { icon: "🔍", label: "Find a product", msg: "Help me find something" },
+    { icon: "✨", label: "Bestsellers", msg: "Show your bestsellers" },
+    { icon: "📦", label: "Track my order", msg: "Track my order" },
+    { icon: "🎁", label: "Offers & policies", msg: "What offers or deals do you have right now?" },
+  ];
+  function renderQuickActions() {
+    const existing = messagesEl.querySelector(".saleshq-qa-grid");
+    if (existing) { existing.remove(); return; } // menu button toggles
+    const grid = document.createElement("div");
+    grid.className = "saleshq-qa-grid saleshq-msg-enter";
+    QUICK_ACTIONS.forEach((a) => {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "saleshq-qa-card";
+      card.innerHTML = `<span class="saleshq-qa-icon">${a.icon}</span><span>${a.label}</span>`;
+      card.onclick = () => {
+        grid.remove();
+        input.value = a.msg;
+        form.dispatchEvent(new Event("submit", { cancelable: true }));
+      };
+      grid.appendChild(card);
+    });
+    messagesEl.appendChild(grid);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
   function renderFollowups(followups) {

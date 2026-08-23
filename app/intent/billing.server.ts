@@ -2,12 +2,13 @@
 // gate already enforces. Called from the app.tsx loader on each admin load:
 // the merchant's active tier becomes their plan + monthly convo cap, with no
 // extra storefront code (proxy.chat → assertBotOperational reads convoLimit).
-import type { authenticate } from "../shopify.server";
+import { unauthenticated } from "../shopify.server";
 import { PLANS, PLAN_NAMES, TRIAL_DAYS, capForPlan, costCapForPlan, pdfPageCapFor, TRIAL_REPLY_CAP, TRIAL_COST_CAP_USD, TRIAL_PDF_PAGE_CAP, type PlanName } from "./plans";
 import { getBackofficeMeta, saveBackoffice, type BackofficeMeta } from "./settings.server";
 
-type AdminCtx = Awaited<ReturnType<typeof authenticate.admin>>;
-type Admin = AdminCtx["admin"];
+// Structural, so both authenticate.admin (admin loads) and unauthenticated.admin
+// (webhooks, storefront self-heal) clients fit.
+type Admin = { graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> };
 type BillingState = { meta: BackofficeMeta; activePlan: PlanName | null; trialActive: boolean };
 
 const SUB_QUERY = `#graphql
@@ -153,5 +154,26 @@ export async function ensureBillingState(shop: string, admin: Admin): Promise<Bi
   } catch (err) {
     console.error("[billing] sync failed:", (err as Error).message);
     return { meta: await getBackofficeMeta(shop), activePlan: null, trialActive: false };
+  }
+}
+
+/**
+ * Backoffice meta for the storefront gate, with a deterministic self-heal:
+ * when the stored state says an internal trial just lapsed (status "trial",
+ * deadline past), re-sync against Shopify BEFORE acting on it — the merchant
+ * may have subscribed since the last admin load, and hiding a paying shop's
+ * bot is the worst failure mode. ensureBillingState rewrites status to
+ * "active" or "trial_expired", so the extra API call fires once per shop,
+ * not per request. Every other state returns the plain DB read.
+ */
+export async function freshBackofficeMeta(shop: string): Promise<BackofficeMeta> {
+  const meta = await getBackofficeMeta(shop);
+  if (meta.status !== "trial" || !trialExpired(meta)) return meta;
+  try {
+    const { admin } = await unauthenticated.admin(shop);
+    return (await ensureBillingState(shop, admin)).meta;
+  } catch (err) {
+    console.error("[billing] storefront re-sync failed:", (err as Error).message);
+    return meta;
   }
 }
