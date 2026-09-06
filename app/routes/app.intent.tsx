@@ -6,21 +6,23 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { intentCohorts } from "../intent/vectors.server";
+import { getShopInfo } from "../intent/settings.server";
 import type { IntentProfile } from "../intent/events";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
-  const [profileRows, cohorts] = await Promise.all([
+  const [profileRows, cohorts, shopInfo] = await Promise.all([
     prisma.intentProfile.findMany({ where: { shopId }, orderBy: { lastUpdated: "desc" }, take: 30 }),
     intentCohorts(shopId).catch(() => []),
+    getShopInfo(shopId).catch(() => ({})),
   ]);
   // Only profiles with an AI-written story read well; signal-only rows are noise here.
   const profiles = profileRows
     .map((r) => ({ p: r.profile as unknown as IntentProfile, at: r.lastUpdated }))
     .filter((x) => (x.p.intentNarrative ?? "").length > 0)
     .slice(0, 12);
-  return { profiles, cohorts };
+  return { profiles, cohorts, currency: (shopInfo as { currencyCode?: string }).currencyCode ?? "" };
 };
 
 // Plain-language labels for engine terms.
@@ -35,6 +37,14 @@ const intentTone = (v: number) => (v >= 0.5 ? "success" : v >= 0.3 ? "warning" :
 
 export default function IntentProfiles() {
   const d = useLoaderData<typeof loader>();
+  // Budgets in the store's own currency (₹, €, …) — never a bare number that
+  // reads as dollars. Falls back to a plain number when the code is unknown.
+  const fmtMoney = (v: number) => {
+    try {
+      if (d.currency) return new Intl.NumberFormat("en", { style: "currency", currency: d.currency, maximumFractionDigits: 0 }).format(v);
+    } catch { /* unknown code → fall through */ }
+    return `${d.currency ? `${d.currency} ` : ""}${Math.round(v).toLocaleString()}`;
+  };
 
   return (
     <s-page heading="Shopper insights">
@@ -54,7 +64,7 @@ export default function IntentProfiles() {
                     <s-badge tone="info">{`${c.size} shopper${c.size === 1 ? "" : "s"}`}</s-badge>
                     {c.focusCategory && <s-badge>{`Interested in ${c.focusCategory}`}</s-badge>}
                     {c.queryIntent && <s-badge>{MINDSET[c.queryIntent] ?? c.queryIntent}</s-badge>}
-                    {c.priceCeiling != null && <s-badge>{`Budget ~${Math.round(c.priceCeiling)}`}</s-badge>}
+                    {c.priceCeiling != null && <s-badge>{`Budget ~${fmtMoney(c.priceCeiling)}`}</s-badge>}
                     {c.avgConversion != null && (
                       <s-badge tone={intentTone(c.avgConversion)}>{`${Math.round(c.avgConversion * 100)}% buying intent`}</s-badge>
                     )}
@@ -84,7 +94,7 @@ export default function IntentProfiles() {
                     )}
                     {p.decisionPhase && <s-badge tone="info">{PHASE[p.decisionPhase] ?? p.decisionPhase}</s-badge>}
                     {p.focusCategory && <s-badge>{`Looking at ${p.focusCategory}`}</s-badge>}
-                    {p.priceCeiling != null && <s-badge>{`Budget ~${Math.round(p.priceCeiling)}`}</s-badge>}
+                    {p.priceCeiling != null && <s-badge>{`Budget ~${fmtMoney(p.priceCeiling)}`}</s-badge>}
                     {p.cartHesitation === "high" && <s-badge tone="warning">Hesitating at the cart</s-badge>}
                     <s-text tone="neutral">{new Date(at).toLocaleString()}</s-text>
                   </s-stack>

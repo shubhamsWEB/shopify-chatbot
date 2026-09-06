@@ -50,7 +50,10 @@ const SYSTEM =
   "shifts (use priceTrajectory/priceBand), category journey, product revisits (comparison), add→remove " +
   "timing. Classify the shopper's query intent: exploratory (browsing broadly), targeted (a specific item), " +
   "comparing (weighing options), or deal_seeking (price/discount-led). Decide the single nextBestAction " +
-  "that would most help them right now. Surface stated-vs-revealed contradictions explicitly.";
+  "that would most help them right now. Surface stated-vs-revealed contradictions explicitly.\n" +
+  "CURRENCY: every price in the event log is in the STORE'S currency (given in the user message). Write all " +
+  "money amounts in the narrative and nextBestAction using that currency's code or symbol. NEVER write $, USD, " +
+  "or any other currency unless it IS the store currency.";
 
 export async function aggregate(args: {
   shopId: string;
@@ -61,7 +64,11 @@ export async function aggregate(args: {
   liveContext?: Record<string, unknown>;
 }): Promise<IntentProfile> {
   const { signals } = args;
+  // Store currency rides on pixel events; "unknown" keeps the model from
+  // assuming dollars when no event carried it.
+  const currency = args.events.map((e) => e.currency).find(Boolean) ?? "unknown — write plain numbers without any currency symbol";
   const user =
+    `Store currency: ${currency}\n\n` +
     `Chronological event log:\n${eventLog(args.events)}\n\n` +
     `Deterministic signals:\n${JSON.stringify(signals)}\n\n` +
     `Live context:\n${JSON.stringify(args.liveContext ?? {})}`;
