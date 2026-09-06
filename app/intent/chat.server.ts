@@ -532,10 +532,13 @@ export async function runChat(args: {
   }
 
   // Intent-clarifying quick replies (don't block on failure).
-  // Store currency: from this turn's tool results, else the session's events
-  // (pixel sends the shop currency) — keeps follow-up chips off imaginary dollars.
+  // Store currency: the shop's configured currencyCode is authoritative (always
+  // set, INR here); tool-result/event currency only fills in if shopInfo is
+  // empty. Ordered shopInfo-first so chips never fall back to imaginary dollars
+  // when a turn's products happen to carry no currency (live bug 2026-09-07).
   const currency =
-    products[0]?.currency ??
+    settings.shopInfo?.currencyCode ||
+    products[0]?.currency ||
     session?.recentEvents?.map((e) => e.currency).find(Boolean);
   // Exploring nudge: offer the store's categories as tappable directions instead
   // of LLM follow-ups (and no product cards) — let the shopper pick a lane.
