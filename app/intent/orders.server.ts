@@ -2,8 +2,8 @@
 // a specific customer via `customer(id: ...)`, so a shopper can only ever see
 // THEIR OWN orders — the customerId comes from Shopify's HMAC-signed
 // `logged_in_customer_id` (see proxy.chat), never from the request body.
-import { getProductDetails } from "./storefront.server";
-import type { ProductCard, ProductDetail } from "./storefront.server";
+import { searchProducts } from "./storefront.server";
+import type { ProductCard } from "./storefront.server";
 
 type AdminGraphql = {
   graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
@@ -16,7 +16,7 @@ export interface OrderSummary {
   financialStatus: string; // PAID | REFUNDED | PENDING | ...
   total: string; // formatted with currency
   tracking: Array<{ number?: string; url?: string; company?: string }>;
-  items: Array<{ title: string; quantity: number; productId?: string }>;
+  items: Array<{ title: string; quantity: number }>;
 }
 
 const gid = (id: string) => (id.startsWith("gid://") ? id : `gid://shopify/Customer/${id}`);
@@ -42,7 +42,7 @@ const ORDERS_QUERY = `#graphql
           displayFinancialStatus
           currentTotalPriceSet { presentmentMoney { amount currencyCode } }
           fulfillments(first: 5) { trackingInfo(first: 3) { number url company } }
-          lineItems(first: 25) { nodes { title quantity product { id } } }
+          lineItems(first: 25) { nodes { title quantity } }
         }
       }
     }
@@ -55,7 +55,7 @@ interface RawOrder {
   displayFinancialStatus: string;
   currentTotalPriceSet?: { presentmentMoney?: { amount?: string; currencyCode?: string } };
   fulfillments?: Array<{ trackingInfo?: Array<{ number?: string; url?: string; company?: string }> }>;
-  lineItems?: { nodes?: Array<{ title: string; quantity: number; product?: { id?: string } }> };
+  lineItems?: { nodes?: Array<{ title: string; quantity: number }> };
 }
 
 /** Recent orders for a customer, newest first. Returns null when the LOOKUP
@@ -70,10 +70,12 @@ export async function getCustomerOrders(admin: AdminGraphql, customerId: string,
     };
     // GraphQL-level failures come back 200 with an errors array — a dead
     // session token or protected-customer-data denial lands here, NOT in the
-    // catch. Treat them as lookup failure, never as an empty order history.
-    if (body.errors || body.data?.customer === undefined) {
-      console.error("[orders] CustomerOrders errored:", JSON.stringify(body.errors ?? body).slice(0, 500));
-      return null;
+    // catch. Only a lookup with NO usable data is a failure; field-level
+    // errors alongside real data are logged and tolerated (live bug: a
+    // missing-scope error on one nested field nulled the whole order history).
+    if (body.errors) console.error("[orders] CustomerOrders errors:", JSON.stringify(body.errors).slice(0, 500));
+    if (body.data?.customer === undefined || body.data?.customer === null) {
+      return body.errors ? null : [];
     }
     const nodes = body.data.customer?.orders?.nodes ?? [];
     return nodes.map((o) => ({
@@ -83,7 +85,7 @@ export async function getCustomerOrders(admin: AdminGraphql, customerId: string,
       financialStatus: o.displayFinancialStatus,
       total: money(o.currentTotalPriceSet?.presentmentMoney?.amount, o.currentTotalPriceSet?.presentmentMoney?.currencyCode),
       tracking: (o.fulfillments ?? []).flatMap((f) => f.trackingInfo ?? []),
-      items: (o.lineItems?.nodes ?? []).map((li) => ({ title: li.title, quantity: li.quantity, productId: li.product?.id })),
+      items: (o.lineItems?.nodes ?? []).map((li) => ({ title: li.title, quantity: li.quantity })),
     }));
   } catch (err) {
     console.error("[orders] getCustomerOrders failed:", (err as Error).message);
@@ -106,12 +108,21 @@ export async function getOrderStatus(admin: AdminGraphql, customerId: string, or
   return orders[0];
 }
 
-/** Product cards for a past order's items, so the shopper can re-add to cart. */
+/** Product cards for a past order's items, so the shopper can re-add to cart.
+ *  Resolved by TITLE through the Storefront API — the Admin order line items
+ *  can't expose product ids without the read_products scope this app doesn't
+ *  request. Exact-title match wins; a near-miss search result is dropped
+ *  rather than shown wrong. */
 export async function getReorderCards(admin: AdminGraphql, shop: string, customerId: string, orderName?: string): Promise<ProductCard[]> {
   const order = await getOrderStatus(admin, customerId, orderName);
   if (!order) return [];
-  const ids = [...new Set(order.items.map((i) => i.productId).filter((x): x is string => !!x))].slice(0, 6);
-  const cards = await Promise.all(ids.map((id) => getProductDetails(shop, id).catch(() => null)));
-  // ProductDetail is a superset of ProductCard → safe to surface as cards.
-  return cards.filter((c): c is ProductDetail => !!c);
+  const titles = [...new Set(order.items.map((i) => i.title).filter(Boolean))].slice(0, 6);
+  const cards = await Promise.all(
+    titles.map((title) =>
+      searchProducts(shop, { query: title, limit: 1 })
+        .then((cs) => (cs[0] && cs[0].title.trim().toLowerCase() === title.trim().toLowerCase() ? cs[0] : null))
+        .catch(() => null),
+    ),
+  );
+  return cards.filter((c): c is ProductCard => !!c);
 }
