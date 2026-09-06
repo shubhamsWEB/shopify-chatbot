@@ -3,6 +3,8 @@
 // Built to stay usable at 1000s of shoppers: the loader filters/aggregates
 // server-side from URL params, charts summarize the filtered set, and the
 // list paginates. Every filter is a plain GET param, so views are shareable.
+// Charts are hand-rolled SVG donuts + CSS bars (SSR-safe, no truncated
+// legends, graceful with 1 data point) rather than recharts.
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -11,7 +13,6 @@ import prisma from "../db.server";
 import { intentCohorts } from "../intent/vectors.server";
 import { getShopInfo } from "../intent/settings.server";
 import type { IntentProfile } from "../intent/events";
-import { Donut, CategoryBars } from "../components/charts";
 
 const PAGE_SIZE = 10;
 // Aggregation window cap — plenty for insight, bounded for a hot loader.
@@ -50,11 +51,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .map((r) => ({ p: r.profile as unknown as IntentProfile, at: r.lastUpdated.toISOString() }))
     .filter((x) => (x.p.intentNarrative ?? "").length > 0);
 
-  // Category filter options come from the UNFILTERED window so chips don't vanish
-  // as you drill in.
-  const catCounts = new Map<string, number>();
-  for (const { p } of all) if (p.focusCategory) catCounts.set(p.focusCategory, (catCounts.get(p.focusCategory) ?? 0) + 1);
-  const catOptions = [...catCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name]) => name);
+  // Per-option counts over the WHOLE window (not the filtered set) so chips
+  // show what's behind them and don't vanish while drilling in.
+  const countBy = (vals: Array<string | undefined>) => {
+    const m: Record<string, number> = {};
+    for (const v of vals) if (v) m[v] = (m[v] ?? 0) + 1;
+    return m;
+  };
+  const counts = {
+    intent: countBy(all.map(({ p }) => p.queryIntent)),
+    phase: countBy(all.map(({ p }) => p.decisionPhase)),
+    readiness: countBy(all.map(({ p }) => readinessOf(p.conversionScore))),
+    cat: countBy(all.map(({ p }) => p.focusCategory)),
+    hesitating: all.filter(({ p }) => p.cartHesitation === "high").length,
+  };
+  const catOptions = Object.entries(counts.cat).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name]) => name);
 
   const filtered = all.filter(({ p }) => {
     if (fIntent && p.queryIntent !== fIntent) return false;
@@ -66,14 +77,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
 
   // Aggregates over the FILTERED set — charts answer "who are these shoppers".
-  const dist = (vals: Array<string | undefined>, labels: Record<string, string>) => {
-    const m = new Map<string, number>();
-    for (const v of vals) if (v) m.set(v, (m.get(v) ?? 0) + 1);
-    return [...m.entries()].map(([k, v]) => ({ name: labels[k] ?? k, value: v })).sort((a, b) => b.value - a.value);
+  const dist = (m: Record<string, number>, labels: Record<string, string>) =>
+    Object.entries(m).map(([k, v]) => ({ name: labels[k] ?? k, value: v })).sort((a, b) => b.value - a.value);
+  const fCounts = {
+    intent: countBy(filtered.map(({ p }) => p.queryIntent)),
+    phase: countBy(filtered.map(({ p }) => p.decisionPhase)),
   };
   const budgets = filtered.map(({ p }) => p.priceCeiling).filter((v): v is number => v != null && v > 0).sort((a, b) => a - b);
   const readiness = { high: 0, medium: 0, low: 0 };
   for (const { p } of filtered) readiness[readinessOf(p.conversionScore)]++;
+  const catFiltered = countBy(filtered.map(({ p }) => p.focusCategory));
 
   const sorted = [...filtered].sort((a, b) => {
     if (sort === "intent") return (b.p.conversionScore ?? 0) - (a.p.conversionScore ?? 0);
@@ -91,19 +104,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     page: safePage,
     pages,
     profiles: sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
-    mindsetDist: dist(filtered.map(({ p }) => p.queryIntent), MINDSET),
-    phaseDist: dist(filtered.map(({ p }) => p.decisionPhase), PHASE),
+    mindsetDist: dist(fCounts.intent, MINDSET),
+    phaseDist: dist(fCounts.phase, PHASE),
     readinessDist: [
       { name: "Ready to buy", value: readiness.high },
       { name: "Warming up", value: readiness.medium },
       { name: "Early browsing", value: readiness.low },
     ].filter((x) => x.value > 0),
-    topCategories: [...catCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, value]) => ({ name, value })),
+    topCategories: Object.entries(catFiltered).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name, value]) => ({ name, value })),
     stats: {
       highIntent: readiness.high,
       hesitating: filtered.filter(({ p }) => p.cartHesitation === "high").length,
       medianBudget: budgets.length ? budgets[Math.floor(budgets.length / 2)] : null,
     },
+    counts,
     catOptions,
   };
 };
@@ -118,23 +132,109 @@ const MINDSET: Record<string, string> = {
 };
 const intentTone = (v: number) => (v >= 0.5 ? "success" : v >= 0.3 ? "warning" : "neutral") as "success" | "warning" | "neutral";
 
-// One filter dimension rendered as toggle chips; clicking the active chip clears it.
-function FilterChips({
-  label, param, options, active, onPick,
-}: { label: string; param: string; options: Array<{ value: string; label: string }>; active: string; onPick: (param: string, value: string) => void }) {
+// Chart palette (CVD-validated) + readiness semantics.
+const HUES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"];
+const READY_COLORS: Record<string, string> = { "Ready to buy": "#0ca30c", "Warming up": "#eda100", "Early browsing": "#c9cdd3" };
+const INKS = { ink: "#1a1d21", muted: "#6b7178", line: "#e3e5e8", soft: "#f6f6f7" };
+
+/* SSR-safe donut: SVG arcs via stroke-dasharray + an HTML legend that never
+   truncates. Renders fine with a single 100% slice. */
+function DonutChart({ data, colors }: { data: Array<{ name: string; value: number }>; colors: string[] }) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (!total) return <div style={{ color: INKS.muted, fontSize: 12.5, padding: "8px 0" }}>No data in this view.</div>;
+  const R = 34, CIRC = 2 * Math.PI * R;
+  let offset = 0;
+  const gap = data.length > 1 ? 2 : 0;
   return (
-    <s-stack direction="inline" gap="small">
-      <s-text tone="neutral">{label}</s-text>
-      {options.map((o) => (
-        <s-button
-          key={o.value}
-          variant={active === o.value ? "primary" : "tertiary"}
-          onClick={() => onPick(param, active === o.value ? "" : o.value)}
-        >
-          {o.label}
-        </s-button>
+    <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <div style={{ position: "relative", width: 92, height: 92, flex: "0 0 auto" }}>
+        <svg width="92" height="92" viewBox="0 0 92 92" style={{ transform: "rotate(-90deg)" }}>
+          {data.map((d, i) => {
+            const len = Math.max((d.value / total) * CIRC - gap, 1);
+            const el = (
+              <circle key={d.name} cx="46" cy="46" r={R} fill="none" stroke={colors[i % colors.length]}
+                strokeWidth="13" strokeDasharray={`${len} ${CIRC - len}`} strokeDashoffset={-offset} />
+            );
+            offset += (d.value / total) * CIRC;
+            return el;
+          })}
+        </svg>
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+          <span style={{ fontSize: 16, fontWeight: 700, color: INKS.ink, lineHeight: 1 }}>{total}</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+        {data.map((d, i) => (
+          <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+            <span style={{ width: 9, height: 9, borderRadius: 3, background: colors[i % colors.length], flex: "0 0 auto" }} />
+            <span style={{ color: INKS.ink }}>{d.name}</span>
+            <span style={{ color: INKS.muted, fontWeight: 600, whiteSpace: "nowrap" }}>{d.value} · {Math.round((d.value / total) * 100)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* Horizontal labelled bars — graceful from 1 to 8 rows, no axis clutter. */
+function HBars({ data }: { data: Array<{ name: string; value: number }> }) {
+  if (!data.length) return <div style={{ color: INKS.muted, fontSize: 12.5, padding: "8px 0" }}>No data in this view.</div>;
+  const max = data[0].value || 1;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {data.map((d) => (
+        <div key={d.name}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>
+            <span style={{ color: INKS.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+            <span style={{ color: INKS.muted, fontWeight: 600 }}>{d.value}</span>
+          </div>
+          <div style={{ height: 6, background: INKS.soft, borderRadius: 3, overflow: "hidden" }}>
+            <div style={{ width: `${Math.max((d.value / max) * 100, 4)}%`, height: "100%", background: HUES[0], borderRadius: 3 }} />
+          </div>
+        </div>
       ))}
-    </s-stack>
+    </div>
+  );
+}
+
+function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ border: `1px solid ${INKS.line}`, borderRadius: 10, padding: "12px 14px", background: "#fff" }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: INKS.muted, marginBottom: 10 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+/* Real chip: pill with border; active = filled dark like Polaris selected chips. */
+function Chip({ label, count, active, onClick }: { label: string; count?: number; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        padding: "5px 12px", borderRadius: 999, cursor: "pointer",
+        fontSize: 12.5, fontWeight: 550, fontFamily: "inherit", lineHeight: 1.3,
+        border: `1px solid ${active ? "#1a1d21" : INKS.line}`,
+        background: active ? "#1a1d21" : "#fff",
+        color: active ? "#fff" : INKS.ink,
+      }}
+    >
+      {label}
+      {count != null && (
+        <span style={{ fontSize: 11, fontWeight: 700, color: active ? "rgba(255,255,255,0.75)" : INKS.muted }}>{count}</span>
+      )}
+    </button>
+  );
+}
+
+function FilterRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      <div style={{ width: 76, flex: "0 0 auto", fontSize: 12, fontWeight: 600, color: INKS.muted, paddingTop: 6 }}>{label}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{children}</div>
+    </div>
   );
 }
 
@@ -144,9 +244,10 @@ export default function IntentProfiles() {
   const pick = (param: string, value: string) => {
     const next = new URLSearchParams(params);
     if (value) next.set(param, value); else next.delete(param);
-    next.delete("page"); // filter change resets pagination
+    if (param !== "page") next.delete("page"); // filter change resets pagination
     setParams(next, { preventScrollReset: true });
   };
+  const toggle = (param: string, value: string) => pick(param, (params.get(param) ?? "") === value ? "" : value);
   const active = (k: string) => params.get(k) ?? "";
   const hasFilters = ["intent", "phase", "readiness", "cat", "hesitating"].some((k) => params.get(k));
 
@@ -160,50 +261,35 @@ export default function IntentProfiles() {
   };
 
   const statTile = (label: string, value: string, hint?: string) => (
-    <s-box padding="base" borderWidth="base" borderRadius="base">
-      <s-stack direction="block" gap="small-300">
-        <s-text tone="neutral">{label}</s-text>
-        <s-heading>{value}</s-heading>
-        {hint && <s-text tone="neutral">{hint}</s-text>}
-      </s-stack>
-    </s-box>
+    <div style={{ border: `1px solid ${INKS.line}`, borderRadius: 10, padding: "12px 14px", background: INKS.soft }}>
+      <div style={{ fontSize: 12, color: INKS.muted, fontWeight: 600 }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, color: INKS.ink, marginTop: 4 }}>{value}</div>
+      {hint && <div style={{ fontSize: 11, color: INKS.muted, marginTop: 2 }}>{hint}</div>}
+    </div>
   );
 
   return (
     <s-page heading="Shopper insights">
       {/* Overview: who is in the current view */}
       <s-section heading="Overview">
-        <s-stack direction="inline" gap="small">
-          <FilterChips
-            label="Window" param="days" active={active("days") || "30"} onPick={(p, v) => pick(p, v || "30")}
-            options={[{ value: "7", label: "7 days" }, { value: "30", label: "30 days" }, { value: "90", label: "90 days" }, { value: "all", label: "All time" }]}
-          />
-        </s-stack>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginTop: 12 }}>
+        <FilterRow label="Window">
+          {[{ v: "7", l: "7 days" }, { v: "30", l: "30 days" }, { v: "90", l: "90 days" }, { v: "all", l: "All time" }].map((o) => (
+            <Chip key={o.v} label={o.l} active={(active("days") || "30") === o.v} onClick={() => pick("days", o.v)} />
+          ))}
+        </FilterRow>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginTop: 14 }}>
           {statTile("Shoppers analyzed", String(d.matched), hasFilters ? `of ${d.total} in window` : undefined)}
           {statTile("Ready to buy", String(d.stats.highIntent), "60%+ buying intent")}
           {statTile("Hesitating at the cart", String(d.stats.hesitating), "added, then wavered")}
           {statTile("Median budget", d.stats.medianBudget != null ? fmtMoney(d.stats.medianBudget) : "—", "typical spend ceiling")}
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16, marginTop: 16 }}>
-          <s-box padding="base" borderWidth="base" borderRadius="base">
-            <s-text tone="neutral">Shopper mindset</s-text>
-            <Donut data={d.mindsetDist} />
-          </s-box>
-          <s-box padding="base" borderWidth="base" borderRadius="base">
-            <s-text tone="neutral">Decision phase</s-text>
-            <Donut data={d.phaseDist} />
-          </s-box>
-          <s-box padding="base" borderWidth="base" borderRadius="base">
-            <s-text tone="neutral">Purchase readiness</s-text>
-            <Donut data={d.readinessDist} />
-          </s-box>
-          {d.topCategories.length > 0 && (
-            <s-box padding="base" borderWidth="base" borderRadius="base">
-              <s-text tone="neutral">Most-wanted categories</s-text>
-              <CategoryBars data={d.topCategories} />
-            </s-box>
-          )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 10, marginTop: 12 }}>
+          <ChartCard title="Shopper mindset"><DonutChart data={d.mindsetDist} colors={HUES} /></ChartCard>
+          <ChartCard title="Decision phase"><DonutChart data={d.phaseDist} colors={HUES} /></ChartCard>
+          <ChartCard title="Purchase readiness">
+            <DonutChart data={d.readinessDist} colors={d.readinessDist.map((x) => READY_COLORS[x.name] ?? HUES[0])} />
+          </ChartCard>
+          <ChartCard title="Most-wanted categories"><HBars data={d.topCategories} /></ChartCard>
         </div>
       </s-section>
 
@@ -238,45 +324,49 @@ export default function IntentProfiles() {
 
       <s-section heading="Shoppers">
         <s-text tone="neutral">
-          What individual shoppers were trying to do, in the assistant&apos;s own words, with the action it recommends.
-          Filter to the shoppers that matter, e.g. ready-to-buy hesitators.
+          Individual shoppers in the assistant&apos;s own words, with the action it recommends.
+          Combine filters to find the ones that matter — e.g. ready-to-buy shoppers hesitating at the cart.
         </s-text>
 
-        <s-stack direction="block" gap="small">
-          <FilterChips
-            label="Mindset" param="intent" active={active("intent")} onPick={pick}
-            options={Object.entries(MINDSET).map(([value, label]) => ({ value, label }))}
-          />
-          <FilterChips
-            label="Phase" param="phase" active={active("phase")} onPick={pick}
-            options={Object.entries(PHASE).map(([value, label]) => ({ value, label }))}
-          />
-          <FilterChips
-            label="Readiness" param="readiness" active={active("readiness")} onPick={pick}
-            options={[{ value: "high", label: "Ready to buy" }, { value: "medium", label: "Warming up" }, { value: "low", label: "Early browsing" }]}
-          />
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "12px 0 16px" }}>
+          <FilterRow label="Mindset">
+            {Object.entries(MINDSET).map(([v, l]) => (
+              <Chip key={v} label={l} count={d.counts.intent[v] ?? 0} active={active("intent") === v} onClick={() => toggle("intent", v)} />
+            ))}
+          </FilterRow>
+          <FilterRow label="Phase">
+            {Object.entries(PHASE).map(([v, l]) => (
+              <Chip key={v} label={l} count={d.counts.phase[v] ?? 0} active={active("phase") === v} onClick={() => toggle("phase", v)} />
+            ))}
+          </FilterRow>
+          <FilterRow label="Readiness">
+            {[{ v: "high", l: "Ready to buy" }, { v: "medium", l: "Warming up" }, { v: "low", l: "Early browsing" }].map((o) => (
+              <Chip key={o.v} label={o.l} count={d.counts.readiness[o.v] ?? 0} active={active("readiness") === o.v} onClick={() => toggle("readiness", o.v)} />
+            ))}
+            <Chip label="Hesitating at the cart" count={d.counts.hesitating} active={active("hesitating") === "1"} onClick={() => toggle("hesitating", "1")} />
+          </FilterRow>
           {d.catOptions.length > 0 && (
-            <FilterChips
-              label="Category" param="cat" active={active("cat")} onPick={pick}
-              options={d.catOptions.map((c) => ({ value: c, label: c }))}
-            />
+            <FilterRow label="Category">
+              {d.catOptions.map((c) => (
+                <Chip key={c} label={c} count={d.counts.cat[c] ?? 0} active={active("cat") === c} onClick={() => toggle("cat", c)} />
+              ))}
+            </FilterRow>
           )}
-          <s-stack direction="inline" gap="small">
-            <FilterChips
-              label="More" param="hesitating" active={active("hesitating")} onPick={pick}
-              options={[{ value: "1", label: "Hesitating at the cart" }]}
-            />
-            <FilterChips
-              label="Sort" param="sort" active={active("sort") || "recent"} onPick={(p, v) => pick(p, v || "recent")}
-              options={[{ value: "recent", label: "Most recent" }, { value: "intent", label: "Highest intent" }, { value: "budget", label: "Highest budget" }]}
-            />
+          <FilterRow label="Sort by">
+            {[{ v: "recent", l: "Most recent" }, { v: "intent", l: "Highest intent" }, { v: "budget", l: "Highest budget" }].map((o) => (
+              <Chip key={o.v} label={o.l} active={(active("sort") || "recent") === o.v} onClick={() => pick("sort", o.v)} />
+            ))}
             {hasFilters && (
-              <s-button variant="tertiary" tone="critical" onClick={() => setParams(new URLSearchParams(active("days") ? { days: active("days") } : {}), { preventScrollReset: true })}>
+              <button
+                type="button"
+                onClick={() => setParams(new URLSearchParams(active("days") ? { days: active("days") } : {}), { preventScrollReset: true })}
+                style={{ border: "none", background: "none", color: "#c5280c", fontSize: 12.5, fontWeight: 600, cursor: "pointer", padding: "5px 6px", fontFamily: "inherit" }}
+              >
                 Clear filters
-              </s-button>
+              </button>
             )}
-          </s-stack>
-        </s-stack>
+          </FilterRow>
+        </div>
 
         {d.profiles.length === 0 ? (
           <s-paragraph>
@@ -305,27 +395,17 @@ export default function IntentProfiles() {
               </s-box>
             ))}
             {d.pages > 1 && (
-              <s-stack direction="inline" gap="small">
-                <s-button variant="tertiary" disabled={d.page <= 1} onClick={() => pickPage(params, setParams, d.page - 1)}>Previous</s-button>
-                <s-text tone="neutral">{`Page ${d.page} of ${d.pages} · ${d.matched} shoppers`}</s-text>
-                <s-button variant="tertiary" disabled={d.page >= d.pages} onClick={() => pickPage(params, setParams, d.page + 1)}>Next</s-button>
-              </s-stack>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Chip label="Previous" active={false} onClick={() => d.page > 1 && pick("page", String(d.page - 1))} />
+                <span style={{ fontSize: 12.5, color: INKS.muted }}>{`Page ${d.page} of ${d.pages} · ${d.matched} shoppers`}</span>
+                <Chip label="Next" active={false} onClick={() => d.page < d.pages && pick("page", String(d.page + 1))} />
+              </div>
             )}
           </s-stack>
         )}
       </s-section>
     </s-page>
   );
-}
-
-function pickPage(
-  params: URLSearchParams,
-  setParams: (p: URLSearchParams, o?: { preventScrollReset?: boolean }) => void,
-  page: number,
-) {
-  const next = new URLSearchParams(params);
-  next.set("page", String(page));
-  setParams(next, { preventScrollReset: true });
 }
 
 export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);
