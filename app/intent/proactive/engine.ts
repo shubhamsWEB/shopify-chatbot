@@ -15,6 +15,7 @@ import { computeFriction } from "./friction";
 import { eligibilityGate, signalGate, suppressionGate } from "./gates";
 import type { GateInput } from "./gates";
 import { isHoldout } from "./holdout";
+import { decideStrategy, strategistDue } from "./strategist";
 import {
   emptyPopups, type Surface, type IntentSnapshot,
   type DecisionRecord, type TriggerInput,
@@ -77,6 +78,11 @@ function buildDirective(
     default:
       return `${base} Offer one concrete, relevant next step. ${skip}`;
   }
+}
+
+// Sharpen a directive with the strategist's session-specific angle.
+function withAngle(directive: string, angle: string | undefined): string {
+  return angle ? `${directive}\n\nSTRATEGY (from live analysis of this shopper's session — follow it): ${angle}` : directive;
 }
 
 // Enforce post-generation guardrails (spec §8.5). Returns null to drop (fail closed).
@@ -165,6 +171,34 @@ export async function decideProactive(
     return fin(record(trigger, intent, now, { eligibility: "pass", signal: `trigger:${triggerReason}`, suppression: "fail" }, false, triggerReason, holdout));
   }
 
+  // ReAct strategist (street-smart layer): the class-driven fallbacks are
+  // generic by construction, so before firing one, let a cheap reasoning pass
+  // read the raw session tape and decide nudge-vs-wait plus a session-specific
+  // angle. Deterministic friction reasons (cart_regret, compare, idle, exit…)
+  // bypass this — their signature IS the reasoning. Fails open: on error the
+  // plain fallback nudge proceeds.
+  let angle: string | undefined;
+  let focusProductId = productId;
+  if (
+    config.signal.strategistEnabled &&
+    (triggerReason === "exploring" || triggerReason === "cross_sell") &&
+    intent &&
+    strategistDue(shopId, sessionId, session.lastEventAt)
+  ) {
+    const strat = await decideStrategy({
+      shop: shopId, surface, events: session.recentEvents, friction, intent, popups,
+      startedAtMs: new Date(session.startedAt).getTime(),
+    });
+    if (strat) {
+      console.log("[proactive] strategist", JSON.stringify({ sessionId, nudge: strat.nudge, why: strat.why, angle: strat.angle }));
+      if (!strat.nudge) {
+        return fin(record(trigger, intent, now, { eligibility: "pass", signal: `trigger:${triggerReason}`, suppression: "pass" }, false, `${triggerReason}:strategist_wait`, holdout));
+      }
+      angle = strat.angle;
+      if (strat.focusProductId) focusProductId = strat.focusProductId;
+    }
+  }
+
   // All gates passed. Shadow mode: log a would-fire, show nothing (spec §15 Phase 2).
   const gates = { eligibility: "pass", signal: `trigger:${triggerReason}`, suppression: "pass" };
   if (config.shadowMode) {
@@ -179,7 +213,7 @@ export async function decideProactive(
   // compose — the only LLM call.
   let result: ChatResult;
   try {
-    result = await runChat({ shopId, sessionId, message: buildDirective(triggerReason, surface, productId, live, friction) });
+    result = await runChat({ shopId, sessionId, message: withAngle(buildDirective(triggerReason, surface, focusProductId, live, friction), angle) });
   } catch (err) {
     const msg = (err as Error).message;
     console.error("[proactive] compose error", msg);

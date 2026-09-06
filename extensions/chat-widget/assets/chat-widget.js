@@ -13,13 +13,14 @@
         return {
           open: parsed.open || false,
           history: parsed.history || [],
-          lastMessageAt: parsed.lastMessageAt || 0
+          lastMessageAt: parsed.lastMessageAt || 0,
+          unread: parsed.unread || 0
         };
       }
     } catch (e) {
       // Ignore parse errors
     }
-    return { open: false, history: [], lastMessageAt: 0 };
+    return { open: false, history: [], lastMessageAt: 0, unread: 0 };
   }
 
   // Save state to sessionStorage
@@ -738,6 +739,17 @@
       try { window.__saleshqAC && window.__saleshqAC.resume(); } catch (e) { /* ignore */ }
     }, { once: true, passive: true }));
 
+  /* Every bot response: soft chime, and when the chat is closed the launcher
+     badge counts unread messages (cleared on open). */
+  function notifyBot() {
+    chime();
+    if (!state.open) {
+      state.unread = (state.unread || 0) + 1;
+      saveState();
+      setBadge(state.unread);
+    }
+  }
+
   function setBadge(n) {
     if (!badgeEl) return;
     if (n > 0 && !CFG.badgeEnabled) return;
@@ -911,6 +923,8 @@
       chat.style.animation = "saleshq-fade-in 0.3s ease-out forwards";
       setButtonIcon(closeIconSvg);
       button.classList.add("saleshq-open"); // mobile sheet hides the launcher
+      state.unread = 0;
+      saveState();
       setBadge(0); // opening clears the unread badge
     } else {
       // Closing the widget just closes it — it does NOT silence the session.
@@ -1062,6 +1076,7 @@
     const hadLocalHistory = state.history.length > 0;
     const bootUI = () => {
       button.style.display = "flex";
+      if (state.unread > 0 && !state.open) setBadge(state.unread); // carry unread across pages
       restoreMessages();
       scheduleWelcome();
       syncTipsFooter(); // config may disable proactive → hide the opt-out link
@@ -1168,7 +1183,7 @@
       if (!data.show) return;
       if (state.open && !wasOpen) return; // user opened it themselves mid-flight
       proactiveOpen = true;
-      chime();
+      notifyBot();
       if (!state.open) toggleChat(); // closed → open with the ready-made nudge
       addMessage("assistant", data.response, { products: data.products || [], followups: data.followups || [] });
       if (data.products && data.products.length) renderProductCarousel(data.products);
@@ -1850,15 +1865,18 @@
       typingEl.remove();
       if (!res.ok || data.serviceStopped) {
         addMessage("assistant", data.message || data.response || "The assistant is temporarily unavailable. Please check back soon.");
+        notifyBot();
         return;
       }
       addMessage("assistant", data.response, { products: data.products || [], followups: data.followups || [] });
+      notifyBot();
       if (data.cartAdd) performCartAdd(data.cartAdd);
       if (data.products && data.products.length) renderProductCarousel(data.products);
       if (data.followups && data.followups.length) renderFollowups(data.followups);
     } catch (err) {
       typingEl.remove();
       addMessage("assistant", "Sorry, I'm having trouble right now. Please try again.");
+      notifyBot();
     }
   };
 
@@ -1958,6 +1976,7 @@
       // no bubble exists; signal fallback so the blocking POST takes over.
       return false;
     }
+    notifyBot();
     return true;
   }
 

@@ -48,6 +48,11 @@ export const config = {
     classFallbackFloor: env("PROACTIVE_CLASS_FALLBACK_FLOOR", 0.05),
     crossSellEnabled: flag("PROACTIVE_CROSS_SELL", true),
     exploringEnabled: flag("PROACTIVE_EXPLORING", true),
+    // ReAct strategist: class-fallback nudges (exploring/cross_sell) are decided
+    // by a cheap reasoning pass over the raw session tape instead of firing
+    // blindly — it can wait, or sharpen the angle. Friction-signature triggers
+    // stay deterministic. Flip PROACTIVE_STRATEGIST=false to fall back to rules.
+    strategistEnabled: flag("PROACTIVE_STRATEGIST", true),
   },
 
   suppression: {
