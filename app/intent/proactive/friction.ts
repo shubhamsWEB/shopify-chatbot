@@ -60,6 +60,20 @@ function latest(events: CanonicalEvent[], field: keyof CanonicalEvent): number {
 }
 
 const EXIT_INTENT_FRESH_MS = 30_000;
+const CART_REMOVE_FRESH_MS = 300_000; // remove within 5 min still counts as "just changed their mind"
+
+// Most recent remove_from_cart with nothing re-added/ordered after it.
+function recentCartRemove(events: CanonicalEvent[]): { recent: boolean; productId?: string } {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type === "add_to_cart" || e.type === "order_created" || e.type === "checkout_started") return { recent: false };
+    if (e.type === "remove_from_cart") {
+      const fresh = Date.now() - new Date(e.timestamp).getTime() < CART_REMOVE_FRESH_MS;
+      return { recent: fresh, productId: e.productId };
+    }
+  }
+  return { recent: false };
+}
 
 export function computeFriction(
   events: CanonicalEvent[],
@@ -77,7 +91,10 @@ export function computeFriction(
       events.some(
         (e) => e.type === "exit_intent" && Date.now() - new Date(e.timestamp).getTime() < EXIT_INTENT_FRESH_MS,
       ));
+  const removed = recentCartRemove(events);
   return {
+    cartRemoveRecent: removed.recent,
+    removedProductId: removed.productId,
     dwellMs: latest(events, "dwellMs"),
     dwellBaselineMs: config.dwellBaselineMs[surface] ?? config.dwellBaselineMs.other,
     pdpLoopCount: loops,

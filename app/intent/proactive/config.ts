@@ -35,7 +35,8 @@ export const config = {
     defaultIntentThreshold: env("PROACTIVE_INTENT_THRESHOLD", 0.15),
     // Per-reason overrides: the friction pattern itself is the intent signal, so
     // dwell/compare need only a light score once that friction is present.
-    reasonThresholds: { product_dwell: 0.08, product_compare: 0.1, browse_no_addtocart: 0.05, search_refinement: 0.05 } as Record<string, number>,
+    // cart_regret: the removal itself is the intent evidence — near-zero floor.
+    reasonThresholds: { product_dwell: 0.08, product_compare: 0.1, browse_no_addtocart: 0.05, search_refinement: 0.05, cart_regret: 0.05 } as Record<string, number>,
     smoothFloor: 0.7, // suppress smoothly-progressing buyers (except idle/exit — see gate)
     exitIntentEnabled: flag("PROACTIVE_EXIT_INTENT", true),
     // Class-driven fallbacks so the engine assists ANY intent, on ANY surface

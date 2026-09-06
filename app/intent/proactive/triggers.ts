@@ -13,17 +13,22 @@ export interface TriggerRule {
 export const triggerConfig: Record<Surface, TriggerRule> = {
   product: {
     frictionReason: (f) =>
+      // just removed something from the cart and hasn't replaced it — the
+      // highest-signal "didn't find the right fit" moment; offer alternatives
+      f.cartRemoveRecent ? "cart_regret"
       // comparison loop, OR carted an item then kept browsing alternatives —
       // both mean "help me decide", so offer a comparison
-      f.pdpLoopCount >= 2 || f.postAddDistinctViews >= 2 ? "product_compare"
+      : f.pdpLoopCount >= 2 || f.postAddDistinctViews >= 2 ? "product_compare"
       : f.dwellMs > f.dwellBaselineMs * 1.8 ? "product_dwell"
       : null,
   },
-  category: { frictionReason: (f) => (f.scrollThrash >= 3 ? "browse_no_addtocart" : null) },
-  search: { frictionReason: (f) => (f.scrollThrash >= 2 ? "search_refinement" : null) },
-  cart: { frictionReason: (f) => (f.cartIdleMs > 25_000 ? "cart_idle" : null) },
+  category: { frictionReason: (f) => (f.cartRemoveRecent ? "cart_regret" : f.scrollThrash >= 3 ? "browse_no_addtocart" : null) },
+  search: { frictionReason: (f) => (f.cartRemoveRecent ? "cart_regret" : f.scrollThrash >= 2 ? "search_refinement" : null) },
+  cart: { frictionReason: (f) => (f.cartRemoveRecent ? "cart_regret" : f.cartIdleMs > 25_000 ? "cart_idle" : null) },
   checkout: { frictionReason: (f) => (f.couponFocusCount >= 2 ? "checkout_friction" : null) },
-  other: { frictionReason: () => null }, // never fire on unknown surfaces
+  // cart_regret is surface-independent by nature (removal often lands the
+  // shopper back on home/collection) — the one reason "other" may fire.
+  other: { frictionReason: (f) => (f.cartRemoveRecent ? "cart_regret" : null) },
 };
 
 // (intentClass, surface) -> is there a concrete help action to offer? (spec §7.2)
@@ -33,7 +38,7 @@ export function hasHelpAction(cls: IntentClass | string, surface: Surface, reaso
   // narrow results, cart_idle/checkout unstick, exit_intent is last-chance.
   if (
     reason === "exit_intent" || reason === "cart_idle" || reason === "checkout_friction" ||
-    reason === "search_refinement" || reason === "browse_no_addtocart" ||
+    reason === "search_refinement" || reason === "browse_no_addtocart" || reason === "cart_regret" ||
     // Class-driven reasons carry their own concrete help on any surface:
     // "exploring" offers to find something, "cross_sell" offers a complement.
     reason === "exploring" || reason === "cross_sell"

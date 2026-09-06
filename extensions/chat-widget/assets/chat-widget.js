@@ -299,6 +299,7 @@
   /* Inject CSS animations and styles */
   const _brandRgbCss = colorToRgb(THEME.primary) || { r: 26, g: 26, b: 26 };
   const brandTintBg = `rgba(${_brandRgbCss.r},${_brandRgbCss.g},${_brandRgbCss.b},0.1)`;
+  const brandTintBorder = `rgba(${_brandRgbCss.r},${_brandRgbCss.g},${_brandRgbCss.b},0.28)`;
   const styleSheet = document.createElement("style");
   styleSheet.textContent = `
     @keyframes saleshq-fade-in {
@@ -371,10 +372,10 @@
     #saleshq-messages::-webkit-scrollbar-thumb:hover {
       background: #ccc;
     }
-    /* Responsive panel (Claude Design project 8cb384f7: desktop/tablet floating
-       panel, mobile full-screen sheet). Positioning lives HERE, not inline
-       cssText, so the media queries can own it per breakpoint. Desktop width
-       kept at the current 480px per merchant preference (design mock shows 400). */
+    /* Responsive panel: compact floating panel on desktop (Intercom-class
+       footprint — full-height 480px read as oversized in merchant feedback,
+       2026-09-07), full-screen sheet on mobile. Positioning lives HERE, not
+       inline cssText, so the media queries can own it per breakpoint. */
     .saleshq-chat {
       position: fixed;
       background: #fff;
@@ -386,12 +387,13 @@
     }
     @media (min-width: 600px) {
       .saleshq-chat {
-        top: 24px;
-        bottom: 96px;
+        top: auto;
+        bottom: 92px;
         ${SIDE}: 24px;
-        width: min(480px, calc(100vw - 48px));
-        border-radius: 18px;
-        box-shadow: 0 24px 64px -16px rgba(15,23,42,0.28), 0 0 0 1px rgba(15,23,42,0.06);
+        width: min(400px, calc(100vw - 48px));
+        height: min(660px, calc(100dvh - 116px));
+        border-radius: 16px;
+        box-shadow: 0 20px 56px -14px rgba(15,23,42,0.30), 0 0 0 1px rgba(15,23,42,0.05);
       }
     }
     @media (max-width: 599px) {
@@ -429,16 +431,18 @@
     }
     .saleshq-product-card {
       flex-shrink: 0;
-      width: 168px;
+      width: 150px;
       background: #fff;
-      border-radius: 14px;
+      border: 1px solid #eef0f2;
+      border-radius: 12px;
       overflow: hidden;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.05);
       scroll-snap-align: start;
+      transition: box-shadow 0.15s, transform 0.15s;
     }
     .saleshq-product-card:hover {
       transform: translateY(-2px);
-      box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.10);
     }
     .saleshq-product-card img {
       width: 100%;
@@ -491,13 +495,15 @@
       margin-bottom: 14px;
     }
     .saleshq-followup-chip {
-      background: #f0f0f0;
-      border: none;
-      border-radius: 14px;
+      background: #fff;
+      border: 1px solid ${brandTintBorder};
+      border-radius: 999px;
       padding: 6px 12px;
-      font-size: 11px;
-      color: #555;
+      font-size: 11.5px;
+      font-weight: 500;
+      color: #374151;
       cursor: pointer;
+      transition: all 0.15s;
     }
     /* In-Chat Cart Notification */
     .saleshq-cart-toast {
@@ -601,8 +607,9 @@
       line-height: 1.3;
     }
     .saleshq-followup-chip:hover {
-      background: #e0e0e0;
-      color: #1a1a1a;
+      background: ${brandTintBg};
+      border-color: ${THEME.primary};
+      color: #111827;
     }
     /* Quick actions: what the assistant can DO beyond chat (find, track,
        offers, bestsellers). Shown on new conversations + via the ⚡ menu. */
@@ -646,8 +653,8 @@
       flex: 0 0 auto;
     }
     .saleshq-menu-btn {
-      width: 44px;
-      height: 44px;
+      width: 40px;
+      height: 40px;
       border: 1px solid #e5e7eb;
       background: #f7f8fa;
       color: #6b7280;
@@ -754,8 +761,8 @@
     position: fixed;
     bottom: 24px;
     ${SIDE}: 24px;
-    width: 56px;
-    height: 56px;
+    width: 52px;
+    height: 52px;
     background: ${THEME.primary};
     color: ${THEME.onPrimary};
     border-radius: 50%;
@@ -783,7 +790,7 @@
 
   chat.innerHTML = `
     <div class="saleshq-head" style="
-      padding: 16px 18px;
+      padding: 13px 16px;
       background: linear-gradient(135deg, ${THEME.primary}, ${THEME.primaryHover});
       color: ${THEME.onPrimary};
       display: flex;
@@ -861,18 +868,18 @@
         autocomplete="off"
         style="
           flex: 1;
-          height: 44px;
+          height: 40px;
           border: 1px solid #e5e7eb;
-          padding: 0 16px;
-          border-radius: 22px;
-          font-size: 14px;
+          padding: 0 14px;
+          border-radius: 20px;
+          font-size: 13.5px;
           transition: all 0.2s;
           background: #f7f8fa;
         "
       />
       <button type="submit" class="saleshq-send-btn" style="
-        width: 44px;
-        height: 44px;
+        width: 40px;
+        height: 40px;
         border: none;
         background: ${THEME.primary};
         color: ${THEME.onPrimary};
@@ -1376,7 +1383,7 @@
       background:${isUser ? THEME.primary : "#fff"};
       color:${isUser ? THEME.onPrimary : "#1f2937"};
       max-width:${isUser ? "82%" : "96%"};
-      font-size:14px;line-height:1.5;letter-spacing:-0.1px;
+      font-size:13.5px;line-height:1.5;letter-spacing:-0.1px;
       box-shadow:${isUser ? "none" : "0 1px 2px rgba(0,0,0,0.08)"};
       border:${isUser ? "none" : "1px solid #eef0f2"};
       word-wrap:break-word;overflow-wrap:anywhere;
@@ -1416,7 +1423,7 @@
         // letter-by-letter vertical wrap ("S/u/p/p/o/r/t"). The first (key)
         // column is wider + sticky so feature names stay readable while data
         // columns scroll horizontally. (Regression re-fix, 2026-07-08.)
-        const FIRST_W = 120, DATA_W = 148;
+        const FIRST_W = 108, DATA_W = 132; // sized for the 400px panel: a 2-product compare needs minimal scrolling
         const dataCols = Math.max(1, header.length - 1);
         const tableW = FIRST_W + DATA_W * dataCols;
         const firstCell = "position:sticky;left:0;z-index:1;";
@@ -1509,7 +1516,7 @@
         alt="${product.title || 'Product'}"
         style="
           width: 100%;
-          height: 116px;
+          height: 104px;
           object-fit: contain;
           background: #f7f7f7;
           ${outOfStock ? "filter: grayscale(0.6); opacity: 0.85;" : ""}

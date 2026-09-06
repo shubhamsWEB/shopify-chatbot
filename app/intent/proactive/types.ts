@@ -35,6 +35,10 @@ export interface FrictionFeatures {
   cartIdleMs: number;
   exitIntent: boolean;
   smoothProgressionScore: number; // 0..1, high = clean progression toward purchase
+  // shopper removed a carted item recently and hasn't re-added or ordered since —
+  // the classic "didn't find quite the right fit" moment (cart_regret trigger)
+  cartRemoveRecent: boolean;
+  removedProductId?: string;
 }
 
 // Per-session popup ledger (owned here).
@@ -51,6 +55,7 @@ export function emptyFriction(): FrictionFeatures {
   return {
     dwellMs: 0, dwellBaselineMs: 0, pdpLoopCount: 0, postAddDistinctViews: 0, scrollThrash: 0,
     couponFocusCount: 0, cartIdleMs: 0, exitIntent: false, smoothProgressionScore: 0,
+    cartRemoveRecent: false,
   };
 }
 export function emptyPopups(): PopupsState {

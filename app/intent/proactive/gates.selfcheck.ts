@@ -40,6 +40,16 @@ assert.equal(eligibilityGate(base({ widgetOpen: true })), "eligibility", "widget
 
 // --- Signal ---
 assert.equal(signalGate(base()), "product_dwell", "high intent + dwell friction fires product_dwell");
+// cart_regret: a fresh remove beats other product signals, fires on low score
+// (the removal IS the evidence), and works surface-independently (incl. "other").
+assert.equal(
+  signalGate(base({ friction: productFriction({ cartRemoveRecent: true }), intent: freshIntent({ score: 0.06 }) })),
+  "cart_regret", "recent cart remove fires cart_regret even on a thin score",
+);
+assert.equal(
+  signalGate(base({ surface: "other", friction: { ...emptyFriction(), cartRemoveRecent: true }, intent: freshIntent({ score: 0.06, class: "cart_hesitation" }) })),
+  "cart_regret", "cart_regret fires on the 'other' surface too",
+);
 assert.equal(signalGate(base({ friction: productFriction({ dwellMs: 1000, pdpLoopCount: 2 }) })), "product_compare", "comparison loop fires product_compare");
 assert.equal(signalGate(base({ popups: { ...emptyPopups(), byTrigger: { product_dwell: NOW - 1000 } } })), null, "per-trigger cooldown suppresses same reason");
 assert.equal(signalGate(base({ friction: productFriction({ smoothProgressionScore: 0.9 }) })), null, "smooth progression suppresses");

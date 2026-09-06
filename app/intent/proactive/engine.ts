@@ -48,7 +48,7 @@ function record(
 // Build the compose directive from the fired trigger (spec §8.2 opener + guardrails).
 function buildDirective(
   reason: string, surface: Surface, productId: string | undefined,
-  live: LiveContext | undefined,
+  live: LiveContext | undefined, friction?: { removedProductId?: string },
 ): string {
   const pid = productId || live?.lastViewedProductId;
   const skip = "If a proactive nudge is NOT clearly helpful right now, reply with exactly: SKIP (nothing else).";
@@ -64,6 +64,10 @@ function buildDirective(
       return `${base} The shopper is lingering on product ${pid}. Call get_product_details(${pid}) first. If in stock, reply with ONE short sentence on its single best benefit for this shopper, then search_products(inStockOnly) for 2-3 similar items (shown as cards); if out of stock, note it in one line and search_products(inStockOnly) for 2-3 alternatives. Do NOT output a markdown table — prose is one sentence, the cards carry the rest. ${skip}`;
     case "product_compare":
       return `${base} The shopper has been comparing several products (last: ${pid}).${live?.cartValue ? " They already have an item in the cart — they may be second-guessing it, so include the carted product in the comparison if you can identify it." : ""} Lead with ONE short sentence framing the comparison, then call compare_products on 2-3 of the in-stock products they've engaged to show a side-by-side table. ${skip}`;
+    case "cart_regret": {
+      const rp = friction?.removedProductId;
+      return `${base} The shopper just removed ${rp ? `product ${rp}` : "an item"} from their cart and hasn't replaced it — it wasn't quite the right fit. NEVER mention or scold the removal. In ONE warm sentence offer to help them find a better match, then ${rp ? `call get_product_details(${rp}) to learn what it was, and ` : ""}call search_products(inStockOnly) for 2-3 strong in-stock alternatives in the same category and price range (shown as cards). ${skip}`;
+    }
     case "cart_idle":
       return `${base} The shopper has an idle cart (value ${live?.cartValue}). Address what might be holding them up (shipping, returns, a size swap) in one line, or offer a complementary in-stock product via search_products(inStockOnly). ${skip}`;
     case "browse_no_addtocart":
@@ -175,7 +179,7 @@ export async function decideProactive(
   // compose — the only LLM call.
   let result: ChatResult;
   try {
-    result = await runChat({ shopId, sessionId, message: buildDirective(triggerReason, surface, productId, live) });
+    result = await runChat({ shopId, sessionId, message: buildDirective(triggerReason, surface, productId, live, friction) });
   } catch (err) {
     const msg = (err as Error).message;
     console.error("[proactive] compose error", msg);
