@@ -191,7 +191,12 @@ export async function decideProactive(
     });
     if (strat) {
       console.log("[proactive] strategist", JSON.stringify({ sessionId, nudge: strat.nudge, why: strat.why, angle: strat.angle }));
-      if (!strat.nudge) {
+      // The strategist may only VETO when there's enough behavior to judge from.
+      // On a thin tape (a fresh/quiet session) a "wait" verdict is unreliable and
+      // was suppressing every fallback nudge on low-traffic stores — so we still
+      // fire, just using its angle. The gates already established help is warranted.
+      const canSuppress = session.recentEvents.length >= 5;
+      if (!strat.nudge && canSuppress) {
         return fin(record(trigger, intent, now, { eligibility: "pass", signal: `trigger:${triggerReason}`, suppression: "pass" }, false, `${triggerReason}:strategist_wait`, holdout));
       }
       angle = strat.angle;
