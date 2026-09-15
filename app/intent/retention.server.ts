@@ -3,6 +3,16 @@
 // dashboard keeps long-term trends, then the raw rows are deleted. The intent
 // engine only ever reads a session's recent events, so it is unaffected.
 //
+// READING IT BACK: analytics.server.getOverview adds EventRollup counts to the
+// raw-window counts so the funnel/totals stay lifetime. Only per-type `count`
+// is safe to aggregate freely.
+//
+// `revenue` is the sum of payload.cartValue FOR THAT TYPE — and cartValue rides
+// on many non-purchase events (a page_view carries the cart's value at the
+// time). So it is real revenue ONLY for type='order_created', and open-cart
+// value for checkout_started. NEVER sum revenue across types: doing so on live
+// data returns ~20x the true figure.
+//
 // Runs opportunistically inside existing requests (no worker/cron): at most
 // once per RUN_EVERY_MS per serverless instance, guarded by a Postgres advisory
 // lock so concurrent instances can't double-roll the same rows.

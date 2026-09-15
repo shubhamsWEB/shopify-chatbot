@@ -118,9 +118,14 @@ export default function Overview() {
             )}
           </s-section>
 
-          <s-section heading="Store funnel (last 30 days)">
+          <s-section heading="Store funnel (all time)">
             <FunnelBars data={o.funnel} />
             <s-text tone="neutral">{`Abandoned checkouts: ${o.abandonedCheckouts.toLocaleString()}`}</s-text>
+            {o.coverage.archivedEvents > 0 && (
+              <s-text tone="neutral">
+                {`Includes ${o.coverage.archivedEvents.toLocaleString()} archived events through ${o.coverage.archivedThrough}. Shopper-level detail below covers the last ${o.coverage.rawWindowDays} days.`}
+              </s-text>
+            )}
           </s-section>
 
           <s-section heading="Activity (last 14 days)">

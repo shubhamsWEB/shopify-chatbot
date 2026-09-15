@@ -3,6 +3,7 @@
 import prisma from "../db.server";
 import { intentCohorts } from "./vectors.server";
 import { getUsageSummary } from "./usage.server";
+import { EVENT_RETENTION_DAYS } from "./retention.server";
 import type { IntentProfile } from "./events";
 
 const FUNNEL = [
@@ -24,6 +25,15 @@ export interface Overview {
   totalSessions: number;
   totalProfiles: number;
   abandonedCheckouts: number;
+  // What the numbers above actually cover. Raw events are pruned after
+  // EVENT_RETENTION_DAYS; counts that CAN be served from the EventRollup
+  // archive (funnel, totals, popup/bot counters) are lifetime, while anything
+  // needing per-session or per-row detail is limited to the raw window.
+  coverage: {
+    rawWindowDays: number;
+    archivedEvents: number;      // events only present in the rollup archive
+    archivedThrough: string | null; // last day covered by the archive (ISO date)
+  };
   avgConversion: number | null;
   funnel: Array<{ label: string; count: number }>;
   eventsByDay: Array<{ day: string; events: number; carts: number; orders: number }>;
@@ -156,7 +166,7 @@ async function resolveTitles(shopId: string, ids: string[]): Promise<Map<string,
 }
 
 export async function getOverview(shopId: string): Promise<Overview> {
-  const [byType, byCategory, byBrand, bySearch, sessions, profileRows, totalEvents, days] = await Promise.all([
+  const [byType, byCategory, byBrand, bySearch, sessions, profileRows, totalEvents, days, archive] = await Promise.all([
     prisma.event.groupBy({ by: ["type"], where: { shopId }, _count: { _all: true } }),
     prisma.event.groupBy({ by: ["category"], where: { shopId, category: { not: null } }, _count: { _all: true } }),
     prisma.event.groupBy({ by: ["brand"], where: { shopId, brand: { not: null } }, _count: { _all: true } }),
@@ -175,9 +185,27 @@ export async function getOverview(shopId: string): Promise<Overview> {
         ORDER BY date_trunc('day', "timestamp")`,
       shopId,
     ),
+    // Pruned history. retention.server rolls events older than the raw window
+    // into EventRollup and deletes the rows; without reading it back here the
+    // dashboard silently loses every event past the cutoff (live bug: a store
+    // with 260 archived product_views showed "Product views 0").
+    prisma.$queryRawUnsafe<Array<{ type: string; n: bigint; last_day: Date | null }>>(
+      `SELECT type, sum("count") AS n, max("day") AS last_day
+         FROM "EventRollup" WHERE shop = $1 GROUP BY type`,
+      shopId,
+    ).catch(() => []),
   ]);
 
-  const count = (t: string) => byType.find((r) => r.type === t)?._count._all ?? 0;
+  const archivedByType = new Map(archive.map((r) => [r.type, Number(r.n)]));
+  const archivedEvents = [...archivedByType.values()].reduce((s, n) => s + n, 0);
+  const archivedThrough = archive
+    .map((r) => r.last_day)
+    .filter((d): d is Date => !!d)
+    .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+
+  // Lifetime count for a type: what's still in the raw window + what was archived.
+  const count = (t: string) =>
+    (byType.find((r) => r.type === t)?._count._all ?? 0) + (archivedByType.get(t) ?? 0);
   const profiles = profileRows.map((r) => r.profile as unknown as IntentProfile);
   const convs = profiles.map((p) => p.conversionScore).filter((x): x is number => x != null);
 
@@ -263,9 +291,14 @@ export async function getOverview(shopId: string): Promise<Overview> {
           }
         : null,
     },
-    totalEvents,
+    totalEvents: totalEvents + archivedEvents,
     totalSessions: sessions.length,
     totalProfiles: profiles.length,
+    coverage: {
+      rawWindowDays: EVENT_RETENTION_DAYS,
+      archivedEvents,
+      archivedThrough: archivedThrough ? archivedThrough.toISOString().slice(0, 10) : null,
+    },
     abandonedCheckouts: Math.max(0, count("checkout_started") - count("order_created")),
     avgConversion: convs.length ? convs.reduce((s, x) => s + x, 0) / convs.length : null,
     funnel: FUNNEL.map((f) => ({ label: f.label, count: count(f.type) })),
